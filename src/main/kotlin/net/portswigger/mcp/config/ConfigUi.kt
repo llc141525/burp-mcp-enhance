@@ -7,10 +7,12 @@ import kotlinx.coroutines.launch
 import net.portswigger.mcp.ServerState
 import net.portswigger.mcp.Swing
 import net.portswigger.mcp.config.components.*
+import net.portswigger.mcp.db.Database
+import net.portswigger.mcp.exporter.Exporter
 import net.portswigger.mcp.providers.Provider
+import net.portswigger.mcp.queue.FileQueue
+import net.portswigger.mcp.queue.MessageQueue
 import java.awt.BorderLayout
-import java.awt.Component.CENTER_ALIGNMENT
-import java.awt.GridBagLayout
 import javax.swing.*
 import javax.swing.Box.*
 import javax.swing.JOptionPane.ERROR_MESSAGE
@@ -21,6 +23,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     val component: JComponent get() = panel
 
     private val listenerHandles = mutableListOf<ListenerHandle>()
+    private val statusDashboard = StatusDashboardPanel()
 
     private val enabledToggle: ToggleSwitch = Design.createToggleSwitch(false) { enabled ->
         if (suppressToggleEvents) return@createToggleSwitch
@@ -43,7 +46,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     private val validationErrorLabel = WarningLabel()
     private val hostField = JTextField(15)
     private val portField = JTextField(5)
-    private val reinstallNotice = WarningLabel("Make sure to reinstall after changing server settings")
+    private val reinstallNotice = WarningLabel("更改服务器设置后请重新安装")
 
     private lateinit var serverConfigurationPanel: ServerConfigurationPanel
     private lateinit var advancedOptionsPanel: AdvancedOptionsPanel
@@ -51,6 +54,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     private lateinit var installationPanel: InstallationPanel
 
     private var toggleListener: ((Boolean) -> Unit)? = null
+    private var restartServerListener: (() -> Unit)? = null
     private var suppressToggleEvents: Boolean = false
 
     init {
@@ -60,6 +64,32 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
         initializeComponents()
         buildUi()
+    }
+
+    fun bindInfrastructure(
+        messageQueue: Any?,
+        fileQueue: Any?,
+        database: Any?,
+        exporter: Any?
+    ) {
+        statusDashboard.messageQueue = messageQueue as? MessageQueue
+        statusDashboard.fileQueue = fileQueue as? FileQueue
+        statusDashboard.database = database as? Database
+        statusDashboard.exporter = exporter as? Exporter
+        statusDashboard.onRestartRequested = {
+            restartServerListener?.invoke()
+        }
+        statusDashboard.refreshAll()
+        statusDashboard.startRefreshing()
+    }
+
+    fun unbindInfrastructure() {
+        statusDashboard.stopRefreshing()
+        statusDashboard.messageQueue = null
+        statusDashboard.fileQueue = null
+        statusDashboard.database = null
+        statusDashboard.exporter = null
+        statusDashboard.refreshAll()
     }
 
     private fun initializeComponents() {
@@ -91,6 +121,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     }
 
     fun cleanup() {
+        statusDashboard.stopRefreshing()
         listenerHandles.forEach { it.remove() }
         listenerHandles.clear()
 
@@ -103,6 +134,10 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         toggleListener = listener
     }
 
+    fun onRestartServerRequested(listener: () -> Unit) {
+        restartServerListener = listener
+    }
+
     fun getConfig(): McpConfig {
         config.host = hostField.text
         portField.text.toIntOrNull()?.let { config.port = it }
@@ -113,6 +148,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     }
 
     fun updateServerState(state: ServerState) {
+        statusDashboard.updateServerState(state)
         CoroutineScope(Dispatchers.Swing).launch {
             suppressToggleEvents = true
 
@@ -141,12 +177,12 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
                     enabledToggle.setState(false, animate = false)
 
                     val friendlyMessage = when (state.exception) {
-                        is UnresolvedAddressException -> "Unable to resolve address"
+                        is UnresolvedAddressException -> "无法解析地址"
                         else -> state.exception.message ?: state.exception.javaClass.simpleName
                     }
 
                     Dialogs.showMessageDialog(
-                        panel, "Failed to start Burp MCP Server: $friendlyMessage", ERROR_MESSAGE
+                        panel, "Burp MCP 服务器启动失败：$friendlyMessage", ERROR_MESSAGE
                     )
                 }
             }
@@ -156,29 +192,10 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     }
 
     private fun buildUi() {
-        val leftPanel = JPanel(GridBagLayout())
-
-        val headerBox = createVerticalBox().apply {
-            add(JLabel("Burp MCP Server").apply {
-                font = Design.Typography.headlineMedium
-                foreground = Design.Colors.onSurface
-                alignmentX = CENTER_ALIGNMENT
-            })
-            add(createVerticalStrut(Design.Spacing.MD))
-            add(JLabel("Burp MCP Server exposes Burp tooling to AI clients.").apply {
-                font = Design.Typography.bodyLarge
-                foreground = Design.Colors.onSurfaceVariant
-                alignmentX = CENTER_ALIGNMENT
-            })
-            add(createVerticalStrut(Design.Spacing.MD))
-            add(
-                Anchor(
-                    text = "Learn more about the Model Context Protocol",
-                    url = "https://modelcontextprotocol.io/introduction"
-                ).apply { alignmentX = CENTER_ALIGNMENT })
+        val leftPanel = JPanel(BorderLayout()).apply {
+            background = Design.Colors.surface
+            add(statusDashboard, BorderLayout.CENTER)
         }
-
-        leftPanel.add(headerBox)
 
         val rightPanelContent = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -197,18 +214,18 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
             verticalScrollBar.unitIncrement = 16
         }
 
-        rightPanelContent.add(serverConfigurationPanel)
-        rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
+        rightPanelContent.add(Design.createCard(serverConfigurationPanel, "服务器配置"))
+        rightPanelContent.add(createVerticalStrut(Design.Spacing.MD))
 
-        rightPanelContent.add(autoApproveTargetsPanel)
+        rightPanelContent.add(Design.createCard(autoApproveTargetsPanel, "HTTP 自动放行目标"))
 
-        rightPanelContent.add(createVerticalStrut(15))
-        rightPanelContent.add(advancedOptionsPanel)
+        rightPanelContent.add(createVerticalStrut(Design.Spacing.MD))
+        rightPanelContent.add(Design.createCard(advancedOptionsPanel, "高级选项"))
         rightPanelContent.add(createVerticalGlue())
         rightPanelContent.add(reinstallNotice)
         rightPanelContent.add(createVerticalStrut(10))
 
-        rightPanelContent.add(installationPanel)
+        rightPanelContent.add(Design.createCard(installationPanel, "安装"))
 
         val columnsPanel = ResponsiveColumnsPanel(leftPanel, rightPanel)
         panel.add(columnsPanel, BorderLayout.CENTER)

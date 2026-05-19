@@ -66,11 +66,11 @@ class ResponsiveColumnsPanel(private val leftPanel: JPanel, private val rightPan
 
                 c.gridx = 0
                 c.gridy = 0
-                c.weightx = 0.35
+                c.weightx = 0.30
                 add(leftPanel, c)
 
                 c.gridx = 1
-                c.weightx = 0.65
+                c.weightx = 0.70
                 add(rightPanel, c)
             }
 

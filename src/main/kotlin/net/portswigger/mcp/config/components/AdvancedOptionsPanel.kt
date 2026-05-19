@@ -19,43 +19,37 @@ class AdvancedOptionsPanel(
     private val reinstallNotice: WarningLabel
 ) : JPanel() {
 
-    private val keepaliveToggle = JCheckBox("Enable keepalive pings", config.keepaliveEnabled)
+    private val keepaliveToggle = JCheckBox("启用保活心跳", config.keepaliveEnabled)
     private val keepaliveIntervalSpinner = JSpinner(SpinnerNumberModel(config.keepaliveIntervalSec, 5, 300, 5))
     private val maxResponseSizeSpinner = JSpinner(SpinnerNumberModel(config.maxResponseSizeKb, 10, 5000, 10))
+    private val strictLocalhostToggle = JCheckBox("严格 localhost 模式（WSL/远程环境请关闭）", config.strictLocalhostMode)
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        updateColors()
+        background = Design.Colors.surface
         alignmentX = LEFT_ALIGNMENT
 
         buildPanel()
         setupFieldTracking()
     }
 
-    override fun updateUI() {
-        super.updateUI()
-        updateColors()
-    }
-
-    private fun updateColors() {
-        background = Design.Colors.surface
-        border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(Design.Colors.outlineVariant, 1),
-            BorderFactory.createEmptyBorder(Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD)
-        )
-    }
-
     private fun buildPanel() {
-        add(Design.createSectionLabel("Advanced Options"))
-        add(createVerticalStrut(Design.Spacing.MD))
-
+        // Note: "高级选项" section label removed — provided by Card wrapper in ConfigUi
         val formPanel = createFormPanel(
-            "Server host:" to hostField, "Server port:" to portField
+            "服务器主机:" to hostField, "服务器端口:" to portField
         )
         add(formPanel)
 
         add(createVerticalStrut(Design.Spacing.MD))
-        add(Design.createSectionLabel("Connection Settings"))
+        add(Design.createSectionLabel("连接设置"))
+        add(createVerticalStrut(Design.Spacing.MD))
+
+        strictLocalhostToggle.apply {
+            font = Design.Typography.bodyLarge
+            foreground = Design.Colors.onSurface
+            isOpaque = false
+        }
+        add(strictLocalhostToggle)
         add(createVerticalStrut(Design.Spacing.MD))
 
         keepaliveToggle.apply {
@@ -66,8 +60,8 @@ class AdvancedOptionsPanel(
         add(keepaliveToggle)
 
         val connectionForm = createFormPanel(
-            "Keepalive interval (s):" to keepaliveIntervalSpinner,
-            "Max response size (KB):" to maxResponseSizeSpinner
+            "保活间隔（秒）:" to keepaliveIntervalSpinner,
+            "最大响应大小（KB）:" to maxResponseSizeSpinner
         )
         add(connectionForm)
     }
@@ -75,6 +69,7 @@ class AdvancedOptionsPanel(
     private fun setupFieldTracking() {
         trackChanges(hostField)
         trackChanges(portField)
+        strictLocalhostToggle.addChangeListener { reinstallNotice.isVisible = true }
         keepaliveToggle.addChangeListener { reinstallNotice.isVisible = true }
         keepaliveIntervalSpinner.addChangeListener { reinstallNotice.isVisible = true }
         maxResponseSizeSpinner.addChangeListener { reinstallNotice.isVisible = true }
@@ -137,17 +132,18 @@ class AdvancedOptionsPanel(
     }
 
     fun setFieldsEnabled(enabled: Boolean) {
-        hostField.isEnabled = enabled
-        portField.isEnabled = enabled
+        // Host/port fields always editable - user may need to rebind
         keepaliveToggle.isEnabled = enabled
         keepaliveIntervalSpinner.isEnabled = enabled
         maxResponseSizeSpinner.isEnabled = enabled
+        strictLocalhostToggle.isEnabled = enabled
     }
 
     fun applyConfig() {
         config.keepaliveEnabled = keepaliveToggle.isSelected
         config.keepaliveIntervalSec = keepaliveIntervalSpinner.value as Int
         config.maxResponseSizeKb = maxResponseSizeSpinner.value as Int
+        config.strictLocalhostMode = strictLocalhostToggle.isSelected
     }
 
 }

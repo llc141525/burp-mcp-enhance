@@ -7,6 +7,8 @@ import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.providers.ClaudeDesktopProvider
 import net.portswigger.mcp.providers.ManualProxyInstallerProvider
 import net.portswigger.mcp.providers.ProxyJarManager
+import java.io.File
+import java.util.UUID
 
 @Suppress("unused")
 class ExtensionBase : BurpExtension {
@@ -15,7 +17,23 @@ class ExtensionBase : BurpExtension {
         api.extension().setName("Burp MCP Server")
 
         val config = McpConfig(api.persistence().extensionData(), api.logging())
-        val serverManager = KtorServerManager(api)
+
+        // Generate a unique project ID and database path
+        val extensionData = api.persistence().extensionData()
+        var projectId = extensionData.getString("projectId")
+        if (projectId == null) {
+            projectId = UUID.randomUUID().toString()
+            extensionData.setString("projectId", projectId)
+        }
+        val dbPath = try {
+            val dbDir = File(System.getProperty("user.home"), ".burp-mcp/db")
+            dbDir.mkdirs()
+            File(dbDir, "$projectId.db").absolutePath
+        } catch (_: Exception) {
+            ":memory:" // fall back to in-memory if directory creation fails
+        }
+
+        val serverManager = KtorServerManager(api, dbPath)
 
         val proxyJarManager = ProxyJarManager(api.logging())
 
@@ -32,10 +50,39 @@ class ExtensionBase : BurpExtension {
             if (enabled) {
                 serverManager.start(config) { state ->
                     configUi.updateServerState(state)
+                    if (state is ServerState.Running) {
+                        configUi.bindInfrastructure(
+                            messageQueue = serverManager.messageQueue,
+                            fileQueue = serverManager.fileQueue,
+                            database = serverManager.database,
+                            exporter = serverManager.exporter
+                        )
+                    } else if (state is ServerState.Stopped || state is ServerState.Failed) {
+                        configUi.unbindInfrastructure()
+                    }
                 }
             } else {
                 serverManager.stop { state ->
                     configUi.updateServerState(state)
+                    if (state is ServerState.Stopped || state is ServerState.Failed) {
+                        configUi.unbindInfrastructure()
+                    }
+                }
+            }
+        }
+
+        configUi.onRestartServerRequested {
+            serverManager.restart(config) { state ->
+                configUi.updateServerState(state)
+                if (state is ServerState.Running) {
+                    configUi.bindInfrastructure(
+                        messageQueue = serverManager.messageQueue,
+                        fileQueue = serverManager.fileQueue,
+                        database = serverManager.database,
+                        exporter = serverManager.exporter
+                    )
+                } else if (state is ServerState.Failed) {
+                    configUi.unbindInfrastructure()
                 }
             }
         }
@@ -51,6 +98,14 @@ class ExtensionBase : BurpExtension {
         if (config.enabled) {
             serverManager.start(config) { state ->
                 configUi.updateServerState(state)
+                if (state is ServerState.Running) {
+                    configUi.bindInfrastructure(
+                        messageQueue = serverManager.messageQueue,
+                        fileQueue = serverManager.fileQueue,
+                        database = serverManager.database,
+                        exporter = serverManager.exporter
+                    )
+                }
             }
         }
     }

@@ -25,11 +25,20 @@ class McpConfigTest {
                 storage[key] as? Boolean ?: when (key) {
                     "enabled" -> true
                     "requireHttpRequestApproval" -> true
+                    "keepaliveEnabled" -> true
+                    "strictLocalhostMode" -> true
                     else -> false
                 }
             }
             every { getString(any()) } answers { storage[firstArg()] as? String ?: "" }
-            every { getInteger(any()) } answers { storage[firstArg()] as? Int ?: 0 }
+            every { getInteger(any()) } answers {
+                val key = firstArg<String>()
+                storage[key] as? Int ?: when (key) {
+                    "keepaliveIntervalSec" -> 30
+                    "maxResponseSizeKb" -> 100
+                    else -> 0
+                }
+            }
             every { setBoolean(any(), any()) } answers {
                 storage[firstArg()] = secondArg<Boolean>()
             }
@@ -283,5 +292,83 @@ class McpConfigTest {
         config.requireHttpRequestApproval = true
         assertTrue(config.requireHttpRequestApproval)
         verify { persistedObject.setBoolean("requireHttpRequestApproval", true) }
+    }
+
+    @Test
+    fun `keepaliveEnabled should default to true`() {
+        assertTrue(config.keepaliveEnabled)
+    }
+
+    @Test
+    fun `keepaliveEnabled should persist correctly`() {
+        config.keepaliveEnabled = false
+        assertFalse(config.keepaliveEnabled)
+        verify { persistedObject.setBoolean("keepaliveEnabled", false) }
+
+        config.keepaliveEnabled = true
+        assertTrue(config.keepaliveEnabled)
+        verify { persistedObject.setBoolean("keepaliveEnabled", true) }
+    }
+
+    @Test
+    fun `keepaliveIntervalSec should default to 30`() {
+        assertEquals(30, config.keepaliveIntervalSec)
+    }
+
+    @Test
+    fun `keepaliveIntervalSec should persist correctly`() {
+        config.keepaliveIntervalSec = 60
+        assertEquals(60, config.keepaliveIntervalSec)
+        verify { persistedObject.setInteger("keepaliveIntervalSec", 60) }
+
+        config.keepaliveIntervalSec = 15
+        assertEquals(15, config.keepaliveIntervalSec)
+        verify { persistedObject.setInteger("keepaliveIntervalSec", 15) }
+    }
+
+    @Test
+    fun `maxResponseSizeKb should default to 100`() {
+        assertEquals(100, config.maxResponseSizeKb)
+    }
+
+    @Test
+    fun `maxResponseSizeKb should persist correctly`() {
+        config.maxResponseSizeKb = 500
+        assertEquals(500, config.maxResponseSizeKb)
+        verify { persistedObject.setInteger("maxResponseSizeKb", 500) }
+
+        config.maxResponseSizeKb = 50
+        assertEquals(50, config.maxResponseSizeKb)
+        verify { persistedObject.setInteger("maxResponseSizeKb", 50) }
+    }
+
+    @Test
+    fun `strictLocalhostMode should default to true`() {
+        assertTrue(config.strictLocalhostMode)
+    }
+
+    @Test
+    fun `strictLocalhostMode should persist correctly`() {
+        config.strictLocalhostMode = false
+        assertFalse(config.strictLocalhostMode)
+        verify { persistedObject.setBoolean("strictLocalhostMode", false) }
+
+        config.strictLocalhostMode = true
+        assertTrue(config.strictLocalhostMode)
+        verify { persistedObject.setBoolean("strictLocalhostMode", true) }
+    }
+
+    @Test
+    fun `history access change listener should be notified`() {
+        var notificationCount = 0
+        val listener = { notificationCount++; Unit }
+
+        config.addHistoryAccessChangeListener(listener)
+
+        config.alwaysAllowHttpHistory = true
+        assertEquals(1, notificationCount)
+
+        config.alwaysAllowWebSocketHistory = true
+        assertEquals(2, notificationCount)
     }
 }

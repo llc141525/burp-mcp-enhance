@@ -15,6 +15,10 @@ import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import kotlinx.coroutines.*
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.db.Database
+import net.portswigger.mcp.exporter.Exporter
+import net.portswigger.mcp.queue.FileQueue
+import net.portswigger.mcp.queue.MessageQueue
 import net.portswigger.mcp.tools.registerTools
 import java.net.URI
 import java.util.concurrent.ExecutorService
@@ -22,7 +26,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-class KtorServerManager(private val api: MontoyaApi) : ServerManager {
+class KtorServerManager(private val api: MontoyaApi, private val dbPath: String = ":memory:") : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newFixedThreadPool(2) { r ->
@@ -31,6 +35,18 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var heartbeatJob: Job? = null
     private var restartJob: Job? = null
+    @Volatile
+    var messageQueue: MessageQueue? = null
+        private set
+    @Volatile
+    var fileQueue: FileQueue? = null
+        private set
+    @Volatile
+    var database: Database? = null
+        private set
+    @Volatile
+    var exporter: Exporter? = null
+        private set
 
     private val currentState = AtomicReference<ServerState>(ServerState.Stopped)
     private val maxRestartAttempts = 3
@@ -44,73 +60,15 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 server?.stop(1000, 5000)
                 server = null
 
-                val mcpServer = Server(
-                    serverInfo = Implementation("burp-suite", "1.1.2"), options = ServerOptions(
-                        capabilities = ServerCapabilities(
-                            tools = ServerCapabilities.Tools(listChanged = false)
-                        )
-                    )
-                )
+                // Create infrastructure
+                messageQueue = MessageQueue()
+                fileQueue = FileQueue()
+                database = Database(dbPath)
+                exporter = Exporter(api, database!!)
+                exporter!!.start()
 
-                server = embeddedServer(Netty, port = config.port, host = config.host) {
-                    install(CORS) {
-                        allowHost("localhost:${config.port}")
-                        allowHost("127.0.0.1:${config.port}")
-
-                        allowMethod(HttpMethod.Get)
-                        allowMethod(HttpMethod.Post)
-
-                        allowHeader(HttpHeaders.ContentType)
-                        allowHeader(HttpHeaders.Accept)
-                        allowHeader("Last-Event-ID")
-
-                        allowCredentials = false
-                        allowNonSimpleContentTypes = true
-                        maxAgeInSeconds = 3600
-                    }
-
-                    intercept(ApplicationCallPipeline.Call) {
-                        val origin = call.request.header("Origin")
-                        val host = call.request.header("Host")
-                        val referer = call.request.header("Referer")
-                        val userAgent = call.request.header("User-Agent")
-
-                        if (origin != null && !isValidOrigin(origin)) {
-                            api.logging().logToOutput("Blocked DNS rebinding attack from origin: $origin")
-                            call.respond(HttpStatusCode.Forbidden)
-                            return@intercept
-                        } else if (isBrowserRequest(userAgent)) {
-                            api.logging().logToOutput("Blocked browser request without Origin header")
-                            call.respond(HttpStatusCode.Forbidden)
-                            return@intercept
-                        }
-
-                        if (host != null && !isValidHost(host, config.port)) {
-                            api.logging().logToOutput("Blocked DNS rebinding attack from host: $host")
-                            call.respond(HttpStatusCode.Forbidden)
-                            return@intercept
-                        }
-
-                        if (referer != null && !isValidReferer(referer)) {
-                            api.logging().logToOutput("Blocked suspicious request from referer: $referer")
-                            call.respond(HttpStatusCode.Forbidden)
-                            return@intercept
-                        }
-
-                        call.response.header("X-Frame-Options", "DENY")
-                        call.response.header("X-Content-Type-Options", "nosniff")
-                        call.response.header("Referrer-Policy", "same-origin")
-                        call.response.header("Content-Security-Policy", "default-src 'none'")
-                    }
-
-                    mcp {
-                        mcpServer
-                    }
-
-                    mcpServer.registerTools(api, config)
-                }.apply {
-                    start(wait = false)
-                }
+                val mcpServer = createMcpServer()
+                server = createEmbeddedServer(config, mcpServer)
 
                 api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
                 currentState.set(ServerState.Running)
@@ -130,6 +88,109 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         }
     }
 
+    override fun restart(config: McpConfig, callback: (ServerState) -> Unit) {
+        currentState.set(ServerState.Stopping)
+        callback(ServerState.Stopping)
+
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        restartJob?.cancel()
+        restartJob = null
+
+        executor.submit {
+            try {
+                server?.stop(1000, 5000)
+                server = null
+
+                val mcpServer = createMcpServer()
+                server = createEmbeddedServer(config, mcpServer)
+
+                api.logging().logToOutput("Restarted MCP server on ${config.host}:${config.port}")
+                currentState.set(ServerState.Running)
+                callback(ServerState.Running)
+                startHeartbeat(config, mcpServer)
+            } catch (e: Exception) {
+                api.logging().logToError(e)
+                currentState.set(ServerState.Failed(e))
+                callback(ServerState.Failed(e))
+                scheduleRestart(config, callback)
+            }
+        }
+    }
+
+    private fun createMcpServer(): Server = Server(
+        serverInfo = Implementation("burp-suite", "1.1.2"), options = ServerOptions(
+            capabilities = ServerCapabilities(
+                tools = ServerCapabilities.Tools(listChanged = false)
+            )
+        )
+    )
+
+    private fun createEmbeddedServer(config: McpConfig, mcpServer: Server): EmbeddedServer<*, *> {
+        return embeddedServer(Netty, port = config.port, host = config.host) {
+            install(CORS) {
+                allowHost("localhost:${config.port}")
+                allowHost("127.0.0.1:${config.port}")
+                if (!config.strictLocalhostMode) {
+                    allowHost("${config.host}:${config.port}")
+                }
+
+                allowMethod(HttpMethod.Get)
+                allowMethod(HttpMethod.Post)
+
+                allowHeader(HttpHeaders.ContentType)
+                allowHeader(HttpHeaders.Accept)
+                allowHeader("Last-Event-ID")
+
+                allowCredentials = false
+                allowNonSimpleContentTypes = true
+                maxAgeInSeconds = 3600
+            }
+
+            intercept(ApplicationCallPipeline.Call) {
+                val origin = call.request.header("Origin")
+                val host = call.request.header("Host")
+                val referer = call.request.header("Referer")
+                val userAgent = call.request.header("User-Agent")
+
+                if (origin != null && !isValidOrigin(origin, config)) {
+                    api.logging().logToOutput("Blocked DNS rebinding attack from origin: $origin")
+                    call.respond(HttpStatusCode.Forbidden)
+                    return@intercept
+                } else if (isBrowserRequest(userAgent)) {
+                    api.logging().logToOutput("Blocked browser request without Origin header")
+                    call.respond(HttpStatusCode.Forbidden)
+                    return@intercept
+                }
+
+                if (host != null && !isValidHost(host, config)) {
+                    api.logging().logToOutput("Blocked DNS rebinding attack from host: $host")
+                    call.respond(HttpStatusCode.Forbidden)
+                    return@intercept
+                }
+
+                if (referer != null && !isValidReferer(referer, config)) {
+                    api.logging().logToOutput("Blocked suspicious request from referer: $referer")
+                    call.respond(HttpStatusCode.Forbidden)
+                    return@intercept
+                }
+
+                call.response.header("X-Frame-Options", "DENY")
+                call.response.header("X-Content-Type-Options", "nosniff")
+                call.response.header("Referrer-Policy", "same-origin")
+                call.response.header("Content-Security-Policy", "default-src 'none'")
+            }
+
+            mcp {
+                mcpServer
+            }
+
+            mcpServer.registerTools(api, config, messageQueue, fileQueue, database, exporter)
+        }.apply {
+            start(wait = false)
+        }
+    }
+
     private fun startHeartbeat(config: McpConfig, mcpServer: Server) {
         heartbeatJob?.cancel()
         if (!config.keepaliveEnabled) return
@@ -138,7 +199,13 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             while (isActive) {
                 delay(config.keepaliveIntervalSec * 1000L)
                 try {
-                    mcpServer.ping()
+                    // Keep SSE connection alive by making a self-request
+                    val url = URI("http://${config.host}:${config.port}/mcp").toURL()
+                    url.openConnection().apply {
+                        connectTimeout = 3000
+                        readTimeout = 3000
+                        setRequestProperty("User-Agent", "MCP-Keepalive/1.0")
+                    }.inputStream.readBytes()
                     api.logging().logToOutput("MCP keepalive ping sent")
                 } catch (e: Exception) {
                     api.logging().logToOutput("MCP keepalive ping failed: ${e.message}")
@@ -184,6 +251,14 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             try {
                 server?.stop(1000, 5000)
                 server = null
+                exporter?.shutdown()
+                exporter = null
+                database?.close()
+                database = null
+                messageQueue?.shutdown()
+                messageQueue = null
+                fileQueue?.shutdown()
+                fileQueue = null
                 api.logging().logToOutput("Stopped MCP server")
                 currentState.set(ServerState.Stopped)
                 callback(ServerState.Stopped)
@@ -205,17 +280,26 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         server?.stop(1000, 5000)
         server = null
 
+        exporter?.shutdown()
+        exporter = null
+        database?.close()
+        database = null
+        messageQueue?.shutdown()
+        messageQueue = null
+        fileQueue?.shutdown()
+        fileQueue = null
+
         executor.shutdown()
         executor.awaitTermination(10, TimeUnit.SECONDS)
     }
 
-    private fun isValidOrigin(origin: String): Boolean {
+    private fun isValidOrigin(origin: String, config: McpConfig): Boolean {
         try {
             val url = URI(origin).toURL()
             val hostname = url.host.lowercase()
 
+            if (!config.strictLocalhostMode) return true
             val allowedHosts = setOf("localhost", "127.0.0.1")
-
             return hostname in allowedHosts
         } catch (_: Exception) {
             return false
@@ -233,8 +317,10 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         return browserIndicators.any { userAgentLower.contains(it) }
     }
 
-    private fun isValidHost(host: String, expectedPort: Int): Boolean {
+    private fun isValidHost(host: String, config: McpConfig): Boolean {
         try {
+            if (!config.strictLocalhostMode) return true
+
             val parts = host.split(":")
             val hostname = parts[0].lowercase()
             val port = if (parts.size > 1) parts[1].toIntOrNull() else null
@@ -244,7 +330,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                 return false
             }
 
-            if (port != null && port != expectedPort) {
+            if (port != null && port != config.port) {
                 return false
             }
 
@@ -254,11 +340,12 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         }
     }
 
-    private fun isValidReferer(referer: String): Boolean {
+    private fun isValidReferer(referer: String, config: McpConfig): Boolean {
         try {
             val url = URI(referer).toURL()
             val hostname = url.host.lowercase()
 
+            if (!config.strictLocalhostMode) return true
             val allowedHosts = setOf("localhost", "127.0.0.1")
             return hostname in allowedHosts
 

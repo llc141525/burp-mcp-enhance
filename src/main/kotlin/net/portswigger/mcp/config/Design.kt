@@ -5,6 +5,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
 import javax.swing.*
+import javax.swing.border.EmptyBorder
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -30,18 +31,35 @@ object Design {
         val listHoverBackground: Color get() = UIManager.getColor("List.hoverBackground") ?: Color(0xF0F8FF)
         val listAlternatingBackground: Color get() = UIManager.getColor("List.alternateRowColor") ?: Color(0xFAFAFA)
         val listBorder: Color get() = UIManager.getColor("List.border") ?: Color(0xDDDDDD)
+
+        // Enhanced color tokens
+        val surfaceVariant: Color get() {
+            val base = surface
+            return Color(
+                (base.red * 0.92 + base.red).toInt().coerceAtMost(255),
+                (base.green * 0.92 + base.green).toInt().coerceAtMost(255),
+                (base.blue * 0.92 + base.blue).toInt().coerceAtMost(255)
+            )
+        }
+        val primaryContainer: Color get() {
+            val p = primary
+            return Color(p.red, p.green, p.blue, 30)
+        }
+        val onPrimaryContainer: Color get() = primary
+        val tertiary: Color get() = Color(0x4A90D9)
     }
 
     object Typography {
         private val baseFont: Font get() = UIManager.getFont("Label.font") ?: Font("Inter", Font.PLAIN, 14)
         private val baseSize: Int get() = baseFont.size
 
-        val headlineMedium: Font get() = baseFont.deriveFont(Font.BOLD, (baseSize * 2.0f))
+        val headlineMedium: Font get() = baseFont.deriveFont(Font.BOLD, (baseSize * 1.8f))
         val titleMedium: Font get() = baseFont.deriveFont(Font.BOLD, (baseSize * 1.14f))
         val bodyLarge: Font get() = baseFont.deriveFont(Font.PLAIN, (baseSize * 1.14f))
         val bodyMedium: Font get() = baseFont.deriveFont(Font.PLAIN, baseSize.toFloat())
         val labelLarge: Font get() = baseFont.deriveFont(Font.BOLD, baseSize.toFloat())
         val labelMedium: Font get() = baseFont.deriveFont(Font.BOLD, (baseSize * 0.86f))
+        val labelSmall: Font get() = baseFont.deriveFont(Font.PLAIN, (baseSize * 0.86f))
     }
 
     object Spacing {
@@ -53,6 +71,106 @@ object Design {
         val LG: Int get() = (24 * scaleFactor).toInt().coerceAtLeast(12)
         val XL: Int get() = (32 * scaleFactor).toInt().coerceAtLeast(16)
     }
+
+    // --- Card Container ---
+
+    fun createCard(content: JComponent, title: String? = null): JPanel {
+        return CardPanel(content, title)
+    }
+
+    private class CardPanel(private val content: JComponent, private val title: String?) : JPanel(BorderLayout()) {
+        private val cardArc = 10
+        private val shadowSize = 3
+        private val innerBorder: Int get() = Spacing.MD
+
+        init {
+            isOpaque = false
+            background = Colors.surface
+            alignmentX = Component.LEFT_ALIGNMENT
+
+            if (title != null) {
+                val header = JPanel(BorderLayout()).apply {
+                    isOpaque = false
+                    border = BorderFactory.createEmptyBorder(Spacing.LG, innerBorder, Spacing.SM, innerBorder)
+                    add(JLabel(title).apply {
+                        font = Typography.titleMedium
+                        foreground = Colors.onSurface
+                    }, BorderLayout.CENTER)
+                }
+                add(header, BorderLayout.NORTH)
+            }
+
+            val contentWrapper = JPanel(BorderLayout()).apply {
+                isOpaque = false
+                border = BorderFactory.createEmptyBorder(0, innerBorder, innerBorder, innerBorder)
+                add(content, BorderLayout.CENTER)
+            }
+            add(contentWrapper, BorderLayout.CENTER)
+        }
+
+        override fun paintComponent(g: Graphics) {
+            super.paintComponent(g)
+            val g2 = g.create() as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+
+            // Shadow
+            g2.color = Color(0, 0, 0, 10)
+            g2.fillRoundRect(shadowSize, shadowSize, width - shadowSize, height - shadowSize, cardArc, cardArc)
+
+            // Background
+            g2.color = Colors.surface
+            g2.fillRoundRect(0, 0, width - shadowSize, height - shadowSize, cardArc, cardArc)
+
+            // Border
+            g2.color = Colors.outlineVariant
+            g2.stroke = BasicStroke(1f)
+            g2.drawRoundRect(0, 0, width - shadowSize - 1, height - shadowSize - 1, cardArc, cardArc)
+
+            g2.dispose()
+        }
+
+        override fun getInsets(): Insets {
+            // Account for the shadow in the insets so layout respects it
+            return Insets(0, 0, shadowSize, shadowSize)
+        }
+    }
+
+    // --- Badge ---
+
+    fun createBadge(text: String, color: Color = Colors.primary): JLabel {
+        return object : JLabel(text) {
+            private val badgeInsets = Insets(2, 6, 2, 6)
+            private val badgeArc = 6
+
+            init {
+                font = Typography.labelSmall
+                foreground = Color.WHITE
+                alignmentY = Component.CENTER_ALIGNMENT
+            }
+
+            override fun getPreferredSize(): Dimension {
+                val fm = getFontMetrics(font)
+                val w = fm.stringWidth(text) + badgeInsets.left + badgeInsets.right + 2
+                val h = fm.height + badgeInsets.top + badgeInsets.bottom
+                return Dimension(w, h)
+            }
+
+            override fun getMinimumSize(): Dimension = preferredSize
+
+            override fun paintComponent(g: Graphics) {
+                val g2 = g.create() as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = color
+                val w = width
+                val h = height
+                g2.fillRoundRect(0, 0, w, h, badgeArc, badgeArc)
+                g2.dispose()
+                super.paintComponent(g)
+            }
+        }
+    }
+
+    // --- Button factory methods with hover support ---
 
     private fun calculateTextFitSize(button: JButton): Dimension {
         val font = Typography.labelLarge
@@ -84,11 +202,36 @@ object Design {
         }
     }
 
+    private fun addHoverEffect(button: JButton, normalBg: () -> Color, hoverBg: () -> Color) {
+        button.addMouseListener(object : MouseAdapter() {
+            override fun mouseEntered(e: MouseEvent) {
+                button.background = hoverBg()
+                button.repaint()
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                button.background = normalBg()
+                button.repaint()
+            }
+        })
+    }
+
     fun createFilledButton(text: String, customSize: Dimension? = null): JButton {
         return object : JButton(text) {
             init {
                 updateColorsAndSizing()
                 applyButtonBaseStyle(this, customSize)
+                addHoverEffect(this,
+                    normalBg = { Colors.primary },
+                    hoverBg = {
+                        val c = Colors.primary
+                        Color(
+                            (c.red * 0.85).toInt().coerceAtMost(255),
+                            (c.green * 0.85).toInt().coerceAtMost(255),
+                            (c.blue * 0.85).toInt().coerceAtMost(255)
+                        )
+                    }
+                )
             }
 
             override fun updateUI() {
@@ -110,6 +253,10 @@ object Design {
             init {
                 updateColorsAndSizing()
                 applyButtonBaseStyle(this, customSize)
+                addHoverEffect(this,
+                    normalBg = { Colors.surface },
+                    hoverBg = { Colors.primaryContainer }
+                )
             }
 
             override fun updateUI() {
@@ -135,6 +282,10 @@ object Design {
                 updateColorsAndSizing()
                 isContentAreaFilled = false
                 applyButtonBaseStyle(this, customSize)
+                addHoverEffect(this,
+                    normalBg = { Colors.transparent },
+                    hoverBg = { Colors.primaryContainer }
+                )
             }
 
             override fun updateUI() {
@@ -186,7 +337,7 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
         private const val TIMER_DELAY = 16
         private const val SPARKLE_DURATION = 800
         private const val SPARKLE_COUNT = 8
-        private const val SPARKLE_MARGIN = 8
+        private const val SPARKLE_MARGIN = 6
         private const val COMPONENT_WIDTH = TRACK_WIDTH + (SPARKLE_MARGIN * 2)
         private const val COMPONENT_HEIGHT = TRACK_HEIGHT + (SPARKLE_MARGIN * 2)
     }
@@ -428,7 +579,7 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
 
     override fun updateUI() {
         super.updateUI()
-        repaint() // Repaint to use updated theme colors
+        repaint()
     }
 
     private fun createRoundRect(

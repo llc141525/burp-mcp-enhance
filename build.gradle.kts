@@ -47,6 +47,7 @@ dependencies {
     implementation(libs.kotlin.stdlib)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.mcp.kotlin.sdk)
+    implementation(libs.sqlite.jdbc)
 
     testImplementation(libs.bundles.test.framework)
     testImplementation(libs.bundles.ktor.test)
@@ -56,6 +57,7 @@ dependencies {
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(providers.gradleProperty("java.toolchain.version").get().toInt()))
+        vendor.set(JvmVendorSpec.matching("Microsoft"))
     }
 }
 

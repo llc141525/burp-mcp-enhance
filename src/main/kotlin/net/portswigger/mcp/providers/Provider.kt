@@ -25,9 +25,9 @@ class ClaudeDesktopProvider(private val logging: Logging, private val proxyJarMa
     private val serverName = "burp"
 
     override val name = "Claude Desktop"
-    override val installButtonText = "Install to $name"
+    override val installButtonText = "安装到 $name"
     override val confirmationText =
-        "Install to $name?\nThis will create an entry within $name's MCP configuration file ($claudeConfigFileName)"
+        "安装到 $name？\n这将在 $name 的 MCP 配置文件（$claudeConfigFileName）中创建一条记录"
 
     override fun install(config: McpConfig): String {
         val proxyJarFile = proxyJarManager.getProxyJar()
@@ -61,7 +61,7 @@ class ClaudeDesktopProvider(private val logging: Logging, private val proxyJarMa
 
         logging.logToOutput("Installed Burp MCP Server to Claude Desktop config")
 
-        return "Installation successful. Please restart $name if it is currently running."
+        return "安装成功。请重启 $name（如果正在运行）。"
     }
 
     private fun configFilePath(): Path? {
@@ -120,14 +120,14 @@ class ClaudeDesktopProvider(private val logging: Logging, private val proxyJarMa
 class ManualProxyInstallerProvider(private val logging: Logging, private val proxyJarManager: ProxyJarManager) :
     Provider {
     override val name = "Proxy jar"
-    override val installButtonText = "Extract server proxy jar"
+    override val installButtonText = "提取服务器代理 jar"
     override val confirmationText = null
 
     override fun install(config: McpConfig): String? {
         val proxyJarFile = proxyJarManager.getProxyJar()
 
         val fileChooser = JFileChooser().apply {
-            dialogTitle = "Save proxy jar"
+            dialogTitle = "保存代理 jar"
             selectedFile = File("mcp-proxy.jar")
         }
 
@@ -144,6 +144,6 @@ class ManualProxyInstallerProvider(private val logging: Logging, private val pro
             throw ex
         }
 
-        return "Extracted proxy jar to $destinationFile"
+        return "代理 jar 已提取到 $destinationFile"
     }
 }

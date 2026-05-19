@@ -109,7 +109,7 @@ object Dialogs {
         contentPanel.add(messageLabel)
         contentPanel.add(Box.createVerticalStrut(Design.Spacing.LG))
 
-        val okButton = Design.createFilledButton("OK").apply {
+        val okButton = Design.createFilledButton("确定").apply {
             alignmentX = Component.CENTER_ALIGNMENT
             addActionListener {
                 dialog.dispose()
@@ -153,13 +153,13 @@ object Dialogs {
 
         when (optionType) {
             JOptionPane.YES_NO_OPTION -> {
-                val noButton = Design.createOutlinedButton("No").apply {
+                val noButton = Design.createOutlinedButton("否").apply {
                     addActionListener {
                         result = JOptionPane.NO_OPTION
                         dialog.dispose()
                     }
                 }
-                val yesButton = Design.createFilledButton("Yes").apply {
+                val yesButton = Design.createFilledButton("是").apply {
                     addActionListener {
                         result = JOptionPane.YES_OPTION
                         dialog.dispose()
@@ -170,13 +170,13 @@ object Dialogs {
             }
 
             JOptionPane.OK_CANCEL_OPTION -> {
-                val cancelButton = Design.createOutlinedButton("Cancel").apply {
+                val cancelButton = Design.createOutlinedButton("取消").apply {
                     addActionListener {
                         result = JOptionPane.CANCEL_OPTION
                         dialog.dispose()
                     }
                 }
-                val okButton = Design.createFilledButton("OK").apply {
+                val okButton = Design.createFilledButton("确定").apply {
                     addActionListener {
                         result = JOptionPane.OK_OPTION
                         dialog.dispose()
@@ -239,14 +239,14 @@ object Dialogs {
             alignmentX = Component.LEFT_ALIGNMENT
         }
 
-        val cancelButton = Design.createOutlinedButton("Cancel").apply {
+        val cancelButton = Design.createOutlinedButton("取消").apply {
             addActionListener {
                 result = null
                 dialog.dispose()
             }
         }
 
-        val okButton = Design.createFilledButton("OK").apply {
+        val okButton = Design.createFilledButton("确定").apply {
             addActionListener {
                 result = inputField.text?.takeIf { it.isNotBlank() }
                 dialog.dispose()

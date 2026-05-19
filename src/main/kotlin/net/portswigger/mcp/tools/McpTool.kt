@@ -11,13 +11,48 @@ import kotlinx.serialization.serializer
 import net.portswigger.mcp.schema.asInputSchema
 import kotlin.experimental.ExperimentalTypeInference
 
-private val lenientJson = Json {
-    coerceInputValues = true
+@PublishedApi
+internal val lenientJson = Json {
     ignoreUnknownKeys = true
+    isLenient = true
 }
 
-private const val DEFAULT_MAX_RESPONSE_SIZE = 100_000
-private const val DEFAULT_MAX_PAGE_SIZE = 20
+/** Recursively converts float/double JsonPrimitives that represent whole numbers to integers.
+ *  Handles cases like 20.0 -> 20 so tree decoder doesn't fail when target type is Int. */
+@PublishedApi
+internal fun normalizeJsonElement(element: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement {
+    return when (element) {
+        is kotlinx.serialization.json.JsonPrimitive -> {
+            val value = element.content
+            if (element.isString) {
+                element
+            } else {
+                // Check if it's a floating point number that represents a whole number
+                val doubleVal = value.toDoubleOrNull()
+                if (doubleVal != null && doubleVal == doubleVal.toLong().toDouble() && value.contains('.')) {
+                    kotlinx.serialization.json.JsonPrimitive(doubleVal.toLong())
+                } else {
+                    element
+                }
+            }
+        }
+        is kotlinx.serialization.json.JsonObject -> {
+            kotlinx.serialization.json.JsonObject(
+                element.mapValues { (_, v) -> normalizeJsonElement(v) }
+            )
+        }
+        is kotlinx.serialization.json.JsonArray -> {
+            kotlinx.serialization.json.JsonArray(
+                element.map { normalizeJsonElement(it) }
+            )
+        }
+    }
+}
+
+@PublishedApi
+internal const val DEFAULT_MAX_RESPONSE_SIZE = 100_000
+@PublishedApi
+internal const val DEFAULT_MAX_PAGE_SIZE = 20
 
 @OptIn(InternalSerializationApi::class)
 inline fun <reified I : Any> Server.mcpTool(
@@ -36,7 +71,7 @@ inline fun <reified I : Any> Server.mcpTool(
                     content = execute(
                         lenientJson.decodeFromJsonElement(
                             I::class.serializer(),
-                            request.arguments
+                            normalizeJsonElement(request.arguments)
                         )
                     )
                 )
@@ -76,7 +111,8 @@ inline fun <reified I : Any> Server.mcpTool(
     })
 }
 
-private fun joinWithSizeLimit(
+@PublishedApi
+internal fun joinWithSizeLimit(
     items: List<CharSequence>,
     separator: String = "\n\n",
     maxSize: Int = DEFAULT_MAX_RESPONSE_SIZE

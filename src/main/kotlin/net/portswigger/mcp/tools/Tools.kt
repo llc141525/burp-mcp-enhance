@@ -14,6 +14,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.db.Database
+import net.portswigger.mcp.exporter.Exporter
+import net.portswigger.mcp.queue.FileQueue
+import net.portswigger.mcp.queue.MessageQueue
 import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.HistoryAccessSecurity
 import net.portswigger.mcp.security.HistoryAccessType
@@ -42,7 +46,22 @@ private fun truncateIfNeeded(serialized: String): String {
     }
 }
 
-fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
+fun Server.registerTools(
+    api: MontoyaApi,
+    config: McpConfig,
+    messageQueue: MessageQueue? = null,
+    fileQueue: FileQueue? = null,
+    database: Database? = null,
+    exporter: Exporter? = null
+) {
+    // Register queue/file tools if infrastructure is available
+    if (messageQueue != null && fileQueue != null) {
+        registerQueueTools(api, messageQueue, fileQueue)
+    }
+    // Register exporter/two-tier query tools if infrastructure is available
+    if (database != null && exporter != null) {
+        registerExporterTools(database, exporter)
+    }
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
         val allowed = runBlocking {
@@ -311,6 +330,45 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         "Editor text has been set"
     }
+
+    mcpTool<AddAutoApproveTarget>(
+        "Adds a hostname or hostname:port to the auto-approve list. Future HTTP requests to this target " +
+        "will be automatically approved without user interaction. Supports wildcard patterns like *.example.com."
+    ) {
+        if (config.addAutoApproveTarget(target)) {
+            "Target added to auto-approve list: $target"
+        } else {
+            "Failed to add target. It may be invalid or already in the list."
+        }
+    }
+
+    mcpTool<RemoveAutoApproveTarget>(
+        "Removes a hostname or hostname:port from the auto-approve list."
+    ) {
+        if (config.removeAutoApproveTarget(target)) {
+            "Target removed from auto-approve list: $target"
+        } else {
+            "Target not found in auto-approve list: $target"
+        }
+    }
+
+    mcpTool<ListAutoApproveTargets>(
+        "Lists all hostnames and hostname:port entries currently in the auto-approve list."
+    ) {
+        val targets = config.getAutoApproveTargetsList()
+        if (targets.isEmpty()) {
+            "No auto-approve targets configured"
+        } else {
+            targets.joinToString("\n") { "- $it" }
+        }
+    }
+
+    mcpTool<ClearAutoApproveTargets>(
+        "Removes all entries from the auto-approve list."
+    ) {
+        config.clearAutoApproveTargets()
+        "All auto-approve targets have been cleared"
+    }
 }
 
 fun getActiveEditor(api: MontoyaApi): JTextArea? {
@@ -427,3 +485,15 @@ data class GenerateCollaboratorPayload(
 data class GetCollaboratorInteractions(
     val payloadId: String? = null
 )
+
+@Serializable
+data class AddAutoApproveTarget(val target: String)
+
+@Serializable
+data class RemoveAutoApproveTarget(val target: String)
+
+@Serializable
+data class ListAutoApproveTargets(val dummy: Boolean = true)
+
+@Serializable
+data class ClearAutoApproveTargets(val dummy: Boolean = true)

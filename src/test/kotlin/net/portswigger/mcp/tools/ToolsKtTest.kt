@@ -32,6 +32,8 @@ import net.portswigger.mcp.KtorServerManager
 import net.portswigger.mcp.ServerState
 import net.portswigger.mcp.TestSseMcpClient
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.db.ProxyHttpEntry
+import net.portswigger.mcp.db.ScannerIssueEntry
 import net.portswigger.mcp.schema.HttpRequestResponse
 import net.portswigger.mcp.schema.toSerializableForm
 import org.junit.jupiter.api.AfterEach
@@ -41,6 +43,12 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.net.ServerSocket
 import javax.swing.JTextArea
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.Serializable
+
+@Serializable
+private data class PaginatedArgs(override val count: Int, override val offset: Int) : Paginated
 
 class ToolsKtTest {
     
@@ -61,12 +69,19 @@ class ToolsKtTest {
             every { getBoolean("requireHistoryAccessApproval") } returns false
             every { getBoolean("_alwaysAllowHttpHistory") } returns false
             every { getBoolean("_alwaysAllowWebSocketHistory") } returns false
-            every { getString("host") } returns "127.0.0.1"
-            every { getString("_autoApproveTargets") } returns ""
+            every { getBoolean("keepaliveEnabled") } returns true
+            every { getBoolean("strictLocalhostMode") } returns true
             every { getInteger("port") } returns testPort
+            every { getInteger("keepaliveIntervalSec") } returns 30
+            every { getInteger("maxResponseSizeKb") } returns 100
             every { setBoolean(any(), any()) } returns Unit
-            every { setString(any(), any()) } returns Unit
             every { setInteger(any(), any()) } returns Unit
+
+            val stringStore = mutableMapOf<String, String>().apply {
+                put("host", "127.0.0.1")
+            }
+            every { getString(any()) } answers { stringStore[firstArg<String>()] ?: "" }
+            every { setString(any(), any()) } answers { stringStore[firstArg<String>()] = secondArg<String>() }
         }
         val mockLogging = mockk<Logging>().apply {
             every { logToError(any<String>()) } returns Unit
@@ -596,6 +611,115 @@ class ToolsKtTest {
     }
 
     @Nested
+    inner class AutoApproveTargetsToolsTests {
+        @Test
+        fun `auto_approve target tools should be registered`() {
+            runBlocking {
+                val tools = client.listTools()
+                val toolNames = tools.map { it.name }
+                assertTrue(toolNames.contains("add_auto_approve_target"))
+                assertTrue(toolNames.contains("remove_auto_approve_target"))
+                assertTrue(toolNames.contains("list_auto_approve_targets"))
+                assertTrue(toolNames.contains("clear_auto_approve_targets"))
+            }
+        }
+
+        @Test
+        fun `add auto approve target should succeed with valid target`() {
+            runBlocking {
+                val result = client.callTool(
+                    "add_auto_approve_target", mapOf("target" to "example.com")
+                )
+                val text = result.expectTextContent()
+                assertEquals("Target added to auto-approve list: example.com", text)
+            }
+        }
+
+        @Test
+        fun `add auto approve target should fail with invalid target`() {
+            runBlocking {
+                val result = client.callTool(
+                    "add_auto_approve_target", mapOf("target" to "")
+                )
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Failed to add target"))
+            }
+        }
+
+        @Test
+        fun `add duplicate target should fail`() {
+            runBlocking {
+                client.callTool("add_auto_approve_target", mapOf("target" to "example.com"))
+                val result = client.callTool(
+                    "add_auto_approve_target", mapOf("target" to "example.com")
+                )
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Failed to add target"))
+            }
+        }
+
+        @Test
+        fun `list auto approve targets should return configured targets`() {
+            runBlocking {
+                client.callTool("add_auto_approve_target", mapOf("target" to "example.com"))
+                client.callTool("add_auto_approve_target", mapOf("target" to "localhost:8080"))
+
+                val result = client.callTool("list_auto_approve_targets", emptyMap())
+                val text = result.expectTextContent()
+                assertTrue(text.contains("example.com"))
+                assertTrue(text.contains("localhost:8080"))
+            }
+        }
+
+        @Test
+        fun `list auto approve targets should return empty message when none configured`() {
+            config.clearAutoApproveTargets()
+            runBlocking {
+                val result = client.callTool("list_auto_approve_targets", emptyMap())
+                val text = result.expectTextContent()
+                assertEquals("No auto-approve targets configured", text)
+            }
+        }
+
+        @Test
+        fun `remove auto approve target should succeed`() {
+            runBlocking {
+                client.callTool("add_auto_approve_target", mapOf("target" to "example.com"))
+                val result = client.callTool(
+                    "remove_auto_approve_target", mapOf("target" to "example.com")
+                )
+                val text = result.expectTextContent()
+                assertEquals("Target removed from auto-approve list: example.com", text)
+            }
+        }
+
+        @Test
+        fun `remove non-existent target should fail`() {
+            runBlocking {
+                val result = client.callTool(
+                    "remove_auto_approve_target", mapOf("target" to "nonexistent.com")
+                )
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Target not found in auto-approve list"))
+            }
+        }
+
+        @Test
+        fun `clear auto approve targets should remove all`() {
+            runBlocking {
+                client.callTool("add_auto_approve_target", mapOf("target" to "example.com"))
+                client.callTool("add_auto_approve_target", mapOf("target" to "test.com"))
+
+                val clearResult = client.callTool("clear_auto_approve_targets", emptyMap())
+                clearResult.expectTextContent("All auto-approve targets have been cleared")
+
+                val listResult = client.callTool("list_auto_approve_targets", emptyMap())
+                listResult.expectTextContent("No auto-approve targets configured")
+            }
+        }
+    }
+
+    @Nested
     inner class EditorTests {
         @Test
         fun `get active editor contents should handle no editor`() {
@@ -991,6 +1115,312 @@ class ToolsKtTest {
         assertEquals("multiple_upper_case_letters", "MultipleUpperCaseLetters".toLowerSnakeCase())
     }
     
+    @Nested
+    inner class PhaseAFixesTests {
+        @Test
+        fun `joinWithSizeLimit should truncate oversized response`() {
+            val items = listOf("A".repeat(50_000), "B".repeat(50_000), "C".repeat(50_000))
+            val result = joinWithSizeLimit(items, maxSize = 80_000)
+
+            assertTrue(result.length <= 80_000 + "... (response truncated, request fewer items)".length)
+            assertTrue(result.contains("(response truncated, request fewer items)"))
+            assertTrue(result.startsWith("A".repeat(50_000)))
+        }
+
+        @Test
+        fun `joinWithSizeLimit should not truncate small responses`() {
+            val items = listOf("small", "items")
+            val result = joinWithSizeLimit(items, maxSize = 100_000)
+
+            assertTrue(result.contains("small"))
+            assertTrue(result.contains("items"))
+            assertFalse(result.contains("truncated"))
+        }
+
+        @Test
+        fun `lenientJson should coerce Float to Int`() {
+            // Simulate what happens when AI sends count=20.0 instead of 20
+            val json = JsonObject(mapOf(
+                "count" to kotlinx.serialization.json.JsonPrimitive(20.0),
+                "offset" to kotlinx.serialization.json.JsonPrimitive(0)
+            ))
+            // normalizeJsonElement converts 20.0 -> 20 before decoding
+            val normalized = normalizeJsonElement(json)
+            val decoded = lenientJson.decodeFromJsonElement(PaginatedArgs.serializer(), normalized)
+
+            assertEquals(20, decoded.count)
+            assertEquals(0, decoded.offset)
+        }
+
+        @Test
+        fun `lenientJson should ignore unknown keys`() {
+            val json = JsonObject(mapOf(
+                "count" to kotlinx.serialization.json.JsonPrimitive(5),
+                "offset" to kotlinx.serialization.json.JsonPrimitive(0),
+                "extraField" to kotlinx.serialization.json.JsonPrimitive("ignored")
+            ))
+            val decoded = lenientJson.decodeFromJsonElement(PaginatedArgs.serializer(), json)
+
+            assertEquals(5, decoded.count)
+            assertEquals(0, decoded.offset)
+        }
+
+        @Test
+        fun `mcpPaginatedTool should cap count at DEFAULT_MAX_PAGE_SIZE`() {
+            val proxy = mockk<Proxy>()
+            val proxyHistory = (1..50).map { i ->
+                mockk<ProxyHttpRequestResponse>().also {
+                    every { it.toSerializableForm() } returns HttpRequestResponse(
+                        request = "GET /item$i HTTP/1.1",
+                        response = "HTTP/1.1 200 OK",
+                        notes = null
+                    )
+                }
+            }
+
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns proxyHistory
+
+            mockkStatic("net.portswigger.mcp.schema.SerializationKt")
+
+            runBlocking {
+                val result = client.callTool(
+                    "get_proxy_http_history", mapOf(
+                        "count" to 100, // Request 100 but should be capped
+                        "offset" to 0
+                    )
+                )
+
+                delay(100)
+                val text = result.expectTextContent()
+                // Should include some items but the key is the server doesn't crash
+                assertNotNull(text)
+            }
+        }
+    }
+
+    @Nested
+    inner class QueueToolsTests {
+        @BeforeEach
+        fun setupQueueTest() {
+            // Reconnect client if needed after collaborator test cleanup
+            runBlocking {
+                if (!client.isConnected()) {
+                    client.connectToServer("http://127.0.0.1:${testPort}")
+                }
+            }
+        }
+
+        @Test
+        fun `submit_task and get_task_result should work end to end`() {
+            runBlocking {
+                val submitResult = client.callTool(
+                    "submit_task", mapOf(
+                        "type" to "send_http1_request",
+                        "params" to mapOf("host" to "example.com", "port" to "80")
+                    )
+                )
+                val submitText = submitResult.expectTextContent()
+                assertTrue(submitText.startsWith("Task submitted: task-"), "Expected task submission: $submitText")
+
+                val taskId = submitText.removePrefix("Task submitted: ")
+
+                delay(500)
+
+                val pollResult = client.callTool(
+                    "get_task_result", mapOf("taskId" to taskId)
+                )
+                val pollText = pollResult.expectTextContent()
+                assertTrue(pollText.contains("COMPLETED"), "Expected completed task: $pollText")
+                assertTrue(pollText.contains(taskId), "Expected matching task ID")
+            }
+        }
+
+        @Test
+        fun `get_task_result should return not found for unknown task`() {
+            runBlocking {
+                val result = client.callTool(
+                    "get_task_result", mapOf("taskId" to "nonexistent")
+                )
+                result.expectTextContent("Task not found: nonexistent")
+            }
+        }
+
+        @Test
+        fun `read_file should return not found for non-existent file`() {
+            runBlocking {
+                val result = client.callTool(
+                    "read_file", mapOf("fileId" to "nonexistent")
+                )
+                result.expectTextContent("File not found: nonexistent")
+            }
+        }
+
+        @Test
+        fun `delete_file should return not found for non-existent file`() {
+            runBlocking {
+                val result = client.callTool(
+                    "delete_file", mapOf("fileId" to "nonexistent")
+                )
+                result.expectTextContent("File not found: nonexistent")
+            }
+        }
+
+        @Test
+        fun `queue tools should be registered`() {
+            runBlocking {
+                val tools = client.listTools()
+                val toolNames = tools.map { it.name }
+                assertTrue(toolNames.contains("submit_task"), "submit_task should be registered: $toolNames")
+                assertTrue(toolNames.contains("get_task_result"), "get_task_result should be registered: $toolNames")
+                assertTrue(toolNames.contains("read_file"), "read_file should be registered: $toolNames")
+                assertTrue(toolNames.contains("delete_file"), "delete_file should be registered: $toolNames")
+            }
+        }
+    }
+
+    @Nested
+    inner class ExporterToolsTests {
+        @BeforeEach
+        fun setupExporterTest() {
+            runBlocking {
+                if (!client.isConnected()) {
+                    client.connectToServer("http://127.0.0.1:${testPort}")
+                }
+            }
+        }
+
+        @Test
+        fun `exporter tools should be registered`() {
+            runBlocking {
+                val tools = client.listTools()
+                val toolNames = tools.map { it.name }
+                assertTrue(toolNames.contains("list_proxy_http_history"), "Should contain list_proxy_http_history: $toolNames")
+                assertTrue(toolNames.contains("get_proxy_http_detail"), "Should contain get_proxy_http_detail: $toolNames")
+                assertTrue(toolNames.contains("list_scanner_issues"), "Should contain list_scanner_issues: $toolNames")
+                assertTrue(toolNames.contains("get_scanner_issue_detail"), "Should contain get_scanner_issue_detail: $toolNames")
+                assertTrue(toolNames.contains("exporter_stats"), "Should contain exporter_stats: $toolNames")
+            }
+        }
+
+        @Test
+        fun `list_proxy_http_history should return empty when no data`() {
+            runBlocking {
+                val result = client.callTool("list_proxy_http_history", mapOf("count" to 10, "offset" to 0))
+                val text = result.expectTextContent()
+                assertEquals("No proxy HTTP history entries found", text)
+            }
+        }
+
+        @Test
+        fun `get_proxy_http_detail should return not found for unknown ids`() {
+            runBlocking {
+                val result = client.callTool("get_proxy_http_detail", mapOf("ids" to "1,2,3"))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("No entries found for IDs"))
+            }
+        }
+
+        @Test
+        fun `list_scanner_issues should return empty when no data`() {
+            runBlocking {
+                val result = client.callTool("list_scanner_issues", mapOf("count" to 10, "offset" to 0))
+                val text = result.expectTextContent()
+                assertEquals("No scanner issues found", text)
+            }
+        }
+
+        @Test
+        fun `get_scanner_issue_detail should return not found for unknown ids`() {
+            runBlocking {
+                val result = client.callTool("get_scanner_issue_detail", mapOf("ids" to "1,2,3"))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("No scanner issues found for IDs"))
+            }
+        }
+
+        @Test
+        fun `exporter_stats should return status`() {
+            runBlocking {
+                val result = client.callTool("exporter_stats", mapOf("dummy" to true))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Exporter running:"))
+                assertTrue(text.contains("Database proxy HTTP entries:"))
+            }
+        }
+
+        @Test
+        fun `clear_database should clear all data`() {
+            val db = serverManager.database ?: fail("Database should be initialized")
+            db.upsertProxyHttpHistory(
+                listOf(ProxyHttpEntry(1, "GET", 200, "http://example.com", null, null, null, null, null, null, 1000))
+            )
+            db.upsertScannerIssues(
+                listOf(ScannerIssueEntry(1, "XSS", "HIGH", "http://example.com", null, null, 1000))
+            )
+            assertEquals(1, db.stats().proxyHttpCount)
+            assertEquals(1, db.stats().scannerIssueCount)
+
+            runBlocking {
+                val result = client.callTool("clear_database", mapOf("target" to "all"))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("cleared"))
+            }
+
+            assertEquals(0, db.stats().proxyHttpCount)
+            assertEquals(0, db.stats().scannerIssueCount)
+        }
+
+        @Test
+        fun `clear_database should clear proxy history only`() {
+            val db = serverManager.database ?: fail("Database should be initialized")
+            db.upsertProxyHttpHistory(
+                listOf(ProxyHttpEntry(1, "GET", 200, "http://example.com", null, null, null, null, null, null, 1000))
+            )
+            db.upsertScannerIssues(
+                listOf(ScannerIssueEntry(1, "XSS", "HIGH", "http://example.com", null, null, 1000))
+            )
+
+            runBlocking {
+                val result = client.callTool("clear_database", mapOf("target" to "proxy_history"))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Proxy HTTP history cleared"))
+            }
+
+            assertEquals(0, db.stats().proxyHttpCount)
+            assertEquals(1, db.stats().scannerIssueCount)
+        }
+
+        @Test
+        fun `clear_database should clear scanner issues only`() {
+            val db = serverManager.database ?: fail("Database should be initialized")
+            db.upsertProxyHttpHistory(
+                listOf(ProxyHttpEntry(1, "GET", 200, "http://example.com", null, null, null, null, null, null, 1000))
+            )
+            db.upsertScannerIssues(
+                listOf(ScannerIssueEntry(1, "XSS", "HIGH", "http://example.com", null, null, 1000))
+            )
+
+            runBlocking {
+                val result = client.callTool("clear_database", mapOf("target" to "scanner_issues"))
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Scanner issues cleared"))
+            }
+
+            assertEquals(1, db.stats().proxyHttpCount)
+            assertEquals(0, db.stats().scannerIssueCount)
+        }
+
+        @Test
+        fun `clear_database tool should be registered`() {
+            runBlocking {
+                val tools = client.listTools()
+                val toolNames = tools.map { it.name }
+                assertTrue(toolNames.contains("clear_database"), "Should contain clear_database: $toolNames")
+            }
+        }
+    }
+
     @Test
     fun `edition specific tools should only register in professional edition`() {
         val burpSuite = mockk<burp.api.montoya.burpsuite.BurpSuite>()

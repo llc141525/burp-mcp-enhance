@@ -17,36 +17,21 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        updateColors()
+        background = Design.Colors.surface
         alignmentX = LEFT_ALIGNMENT
 
         buildPanel()
     }
 
-    override fun updateUI() {
-        super.updateUI()
-        updateColors()
-    }
-
-    private fun updateColors() {
-        background = Design.Colors.surface
-        border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(Design.Colors.outlineVariant, 1),
-            BorderFactory.createEmptyBorder(Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD)
-        )
-    }
-
     private fun buildPanel() {
-        add(Design.createSectionLabel("Auto-Approved HTTP Targets"))
-        add(Box.createVerticalStrut(Design.Spacing.MD))
-
-        val descLabel = JLabel("Specify domains and hosts that can be accessed without approval.").apply {
+        // Note: "HTTP 自动放行目标" section label removed — provided by Card wrapper in ConfigUi
+        val descLabel = JLabel("指定无需审批即可访问的域名和主机。").apply {
             alignmentX = LEFT_ALIGNMENT
             font = Design.Typography.bodyMedium
             foreground = Design.Colors.onSurfaceVariant
             border = BorderFactory.createEmptyBorder(0, 0, Design.Spacing.SM, 0)
         }
-        val examplesLabel = JLabel("Examples: example.com, localhost:8080, *.api.com").apply {
+        val examplesLabel = JLabel("例如：example.com, localhost:8080, *.api.com").apply {
             alignmentX = LEFT_ALIGNMENT
             font = Design.Typography.labelMedium
             foreground = Design.Colors.onSurfaceVariant
@@ -219,11 +204,11 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
             border = BorderFactory.createEmptyBorder(Design.Spacing.SM, 0, 0, 0)
         }
 
-        val addButton = Design.createFilledButton("Add").apply {
+        val addButton = Design.createFilledButton("添加").apply {
             addActionListener {
                 val input = Dialogs.showInputDialog(
                     findBurpFrame(),
-                    "Enter target (hostname or hostname:port):\nExamples: example.com, localhost:8080, *.api.com"
+                    "输入目标（域名或 域名:端口）：\n例如：example.com, localhost:8080, *.api.com"
                 )
 
                 if (!input.isNullOrBlank()) {
@@ -233,7 +218,7 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
                     } else {
                         Dialogs.showMessageDialog(
                             findBurpFrame(),
-                            "Invalid target format. Use hostname, IP address, hostname:port, or wildcard (*.domain)",
+                            "目标格式无效。请使用域名、IP 地址、域名:端口 或通配符（*.domain）",
                             ERROR_MESSAGE
                         )
                     }
@@ -241,7 +226,7 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
             }
         }
 
-        val removeButton = Design.createOutlinedButton("Remove").apply {
+        val removeButton = Design.createOutlinedButton("删除").apply {
             addActionListener {
                 val selectedIndex = targetsList.selectedIndex
                 if (selectedIndex >= 0) {
@@ -250,10 +235,10 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
             }
         }
 
-        val clearButton = Design.createOutlinedButton("Clear All").apply {
+        val clearButton = Design.createOutlinedButton("清除全部").apply {
             addActionListener {
                 val result = Dialogs.showConfirmDialog(
-                    findBurpFrame(), "Remove all auto-approved targets?", YES_NO_OPTION
+                    findBurpFrame(), "是否清除所有自动放行目标？", YES_NO_OPTION
                 )
 
                 if (result == YES_OPTION) {

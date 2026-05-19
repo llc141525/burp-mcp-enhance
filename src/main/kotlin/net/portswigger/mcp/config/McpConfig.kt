@@ -20,6 +20,7 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     var keepaliveEnabled by storage.boolean(true)
     var keepaliveIntervalSec by storage.int(30)
     var maxResponseSizeKb by storage.int(100)
+    var strictLocalhostMode by storage.boolean(true)
 
     private var _alwaysAllowHttpHistory by storage.boolean(false)
     var alwaysAllowHttpHistory: Boolean

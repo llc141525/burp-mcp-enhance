@@ -24,28 +24,14 @@ class InstallationPanel(
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        updateColors()
+        background = Design.Colors.surface
         alignmentX = LEFT_ALIGNMENT
 
         buildPanel()
     }
 
-    override fun updateUI() {
-        super.updateUI()
-        updateColors()
-    }
-
-    private fun updateColors() {
-        background = Design.Colors.surface
-        border = BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(Design.Colors.outlineVariant, 1),
-            BorderFactory.createEmptyBorder(Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD, Design.Spacing.MD)
-        )
-    }
-
     private fun buildPanel() {
-        add(Design.createSectionLabel("Installation"))
-        add(createVerticalStrut(Design.Spacing.SM))
+        // Note: "安装" section label removed — provided by Card wrapper in ConfigUi
 
         val installOptions = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -113,7 +99,7 @@ class InstallationPanel(
                 CoroutineScope(Dispatchers.Swing).launch {
                     Dialogs.showMessageDialog(
                         parentComponent,
-                        "Failed to install for ${provider.name}: ${e.message ?: e.javaClass.simpleName}",
+                        "${provider.name} 安装失败：${e.message ?: e.javaClass.simpleName}",
                         ERROR_MESSAGE
                     )
                 }
@@ -127,7 +113,7 @@ class InstallationPanel(
             isOpaque = false
             add(
                 Anchor(
-                    text = "Manual install steps",
+                    text = "手动安装步骤",
                     url = "https://github.com/PortSwigger/mcp-server?tab=readme-ov-file#manual-installations"
                 )
             )
