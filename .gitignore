@@ -40,3 +40,12 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+# ai
+.claude
+.mcp.json
+ARCHITECTURE.md
+CLAUDE.md
+CODEMAP.md
+.github
+mcp-minimax

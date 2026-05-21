@@ -28,7 +28,7 @@ fun Server.registerExporterTools(database: Database, exporter: Exporter) {
 
     mcpTool<ListProxyHttpHistory>(
         "Lists proxy HTTP history from local cache. Returns lightweight entries with id, method, status, url, " +
-        "content_type, and param_names. Use get_proxy_http_detail with specific IDs to get full request/response data. " +
+        "content_type, param_names, and hit_count. Use get_proxy_http_detail with specific IDs to get full request/response data. " +
         "Use count ≤ 20 for smaller responses."
     ) {
         val entries = database.listProxyHttpHistory(offset = offset, count = count.coerceAtMost(20))
@@ -43,6 +43,7 @@ fun Server.registerExporterTools(database: Database, exporter: Exporter) {
                     appendLine("URL: ${entry.url}")
                     entry.contentType?.let { appendLine("Content-Type: $it") }
                     entry.paramNames?.let { appendLine("Params: ${it.joinToString(", ")}") }
+                    if (entry.hitCount > 1) appendLine("Hits: ${entry.hitCount}")
                 }
             }
         }
@@ -64,6 +65,7 @@ fun Server.registerExporterTools(database: Database, exporter: Exporter) {
                 entry.status?.let { appendLine("Status: $it") }
                 appendLine("URL: ${entry.url}")
                 entry.contentType?.let { appendLine("Content-Type: $it") }
+                if (entry.hitCount > 1) appendLine("Hits: ${entry.hitCount}")
                 appendLine()
                 appendLine("--- Request ---")
                 entry.requestHeaders?.let { appendLine(it) }
@@ -142,6 +144,7 @@ fun Server.registerExporterTools(database: Database, exporter: Exporter) {
             appendLine("Last export: ${if (stats.lastExportTime > 0) "yes" else "never"}")
             appendLine("Database proxy HTTP entries: ${stats.dbStats.proxyHttpCount}")
             appendLine("Database scanner issues: ${stats.dbStats.scannerIssueCount}")
+            if (stats.dbStats.blobCount > 0) appendLine("Database large responses: ${stats.dbStats.blobCount}")
         }
     }
 

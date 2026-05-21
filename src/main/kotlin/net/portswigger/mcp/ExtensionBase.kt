@@ -4,6 +4,7 @@ import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
 import net.portswigger.mcp.config.ConfigUi
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.logging.LogWriter
 import net.portswigger.mcp.providers.ClaudeDesktopProvider
 import net.portswigger.mcp.providers.ManualProxyInstallerProvider
 import net.portswigger.mcp.providers.ProxyJarManager
@@ -25,15 +26,20 @@ class ExtensionBase : BurpExtension {
             projectId = UUID.randomUUID().toString()
             extensionData.setString("projectId", projectId)
         }
+        // Start file-based logging for diagnostics
+        val logDir = File(System.getProperty("user.home"), ".burp-mcp/logs").also { it.mkdirs() }
+        val logWriter = LogWriter(logDir).also { it.start() }
+
         val dbPath = try {
             val dbDir = File(System.getProperty("user.home"), ".burp-mcp/db")
             dbDir.mkdirs()
             File(dbDir, "$projectId.db").absolutePath
-        } catch (_: Exception) {
-            ":memory:" // fall back to in-memory if directory creation fails
+        } catch (e: Exception) {
+            logWriter.log("WARN", "server", "Failed to create DB directory, falling back to in-memory DB", e)
+            ":memory:"
         }
 
-        val serverManager = KtorServerManager(api, dbPath)
+        val serverManager = KtorServerManager(api, dbPath, logWriter)
 
         val proxyJarManager = ProxyJarManager(api.logging())
 
@@ -91,6 +97,7 @@ class ExtensionBase : BurpExtension {
 
         api.extension().registerUnloadingHandler {
             serverManager.shutdown()
+            logWriter.shutdown()
             configUi.cleanup()
             config.cleanup()
         }

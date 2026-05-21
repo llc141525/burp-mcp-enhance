@@ -6,9 +6,14 @@ import burp.api.montoya.persistence.PersistedObject
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.db.ProxyHttpEntry
+import net.portswigger.mcp.exporter.Exporter
+import net.portswigger.mcp.queue.FileQueue
+import net.portswigger.mcp.queue.MessageQueue
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -256,5 +261,147 @@ class KtorServerManagerTest {
         }
 
         serverManager.stop {}
+    }
+
+    @Test
+    fun `start should initialize infrastructure`() {
+        serverManager.start(config) { }
+
+        runBlocking {
+            var running = false
+            for (i in 1..30) {
+                delay(100)
+                if (serverManager.database != null) { running = true; break }
+            }
+            assertTrue(running, "Server should initialize infrastructure")
+        }
+
+        assertNotNull(serverManager.messageQueue, "messageQueue should be initialized")
+        assertNotNull(serverManager.fileQueue, "fileQueue should be initialized")
+        assertNotNull(serverManager.database, "database should be initialized")
+        assertNotNull(serverManager.exporter, "exporter should be initialized")
+
+        serverManager.stop {}
+    }
+
+    @Test
+    fun `restart should preserve infrastructure and access to components`() {
+        val states = mutableListOf<ServerState>()
+
+        serverManager.start(config) { state ->
+            states.add(state)
+        }
+
+        runBlocking {
+            var running = false
+            for (i in 1..30) {
+                delay(100)
+                if (states.any { it is ServerState.Running }) { running = true; break }
+            }
+            assertTrue(running, "Server should reach Running state")
+        }
+
+        val initialMessageQueue = serverManager.messageQueue
+        val initialFileQueue = serverManager.fileQueue
+        val initialDatabase = serverManager.database
+        val initialExporter = serverManager.exporter
+
+        assertNotNull(initialMessageQueue)
+        assertNotNull(initialFileQueue)
+        assertNotNull(initialDatabase)
+        assertNotNull(initialExporter)
+
+        states.clear()
+        serverManager.restart(config) { state -> states.add(state) }
+
+        runBlocking {
+            var running = false
+            for (i in 1..30) {
+                delay(100)
+                if (states.any { it is ServerState.Running }) { running = true; break }
+            }
+            assertTrue(running, "Server should reach Running state after restart")
+        }
+
+        // Infrastructure should be preserved (same instances) during restart
+        assertSame(initialMessageQueue, serverManager.messageQueue, "messageQueue should be same instance after restart")
+        assertSame(initialFileQueue, serverManager.fileQueue, "fileQueue should be same instance after restart")
+        assertSame(initialDatabase, serverManager.database, "database should be same instance after restart")
+        assertSame(initialExporter, serverManager.exporter, "exporter should be same instance after restart")
+
+        serverManager.stop {}
+    }
+
+    @Test
+    fun `heartbeatPing should call ping function at configured interval`() {
+        runBlocking {
+            var pingCount = 0
+            val ping: suspend () -> Unit = { pingCount++ }
+
+            val job = launch {
+                serverManager.heartbeatPing(
+                    keepaliveIntervalSec = 1,
+                    ping = ping,
+                    logger = {}
+                )
+            }
+
+            // Wait slightly more than one interval
+            delay(1100)
+            job.cancelAndJoin()
+
+            assertEquals(1, pingCount, "Ping should be called once after 1.1s with 1s interval")
+        }
+    }
+
+    @Test
+    fun `heartbeatPing should continue after ping failure`() {
+        runBlocking {
+            var pingCount = 0
+            val failPing: suspend () -> Unit = {
+                pingCount++
+                if (pingCount <= 2) throw RuntimeException("Ping failed $pingCount")
+            }
+
+            val job = launch {
+                serverManager.heartbeatPing(
+                    keepaliveIntervalSec = 1,
+                    ping = failPing,
+                    logger = {}
+                )
+            }
+
+            delay(3600)
+            job.cancelAndJoin()
+
+            assertTrue(pingCount >= 3, "Ping should continue after failures, got: $pingCount")
+        }
+    }
+
+    @Test
+    fun `heartbeatPing should log success and failure messages`() {
+        runBlocking {
+            val logMessages = mutableListOf<String>()
+            var shouldFail = false
+            val ping: suspend () -> Unit = {
+                if (shouldFail) throw RuntimeException("fail")
+            }
+
+            val job = launch {
+                serverManager.heartbeatPing(
+                    keepaliveIntervalSec = 1,
+                    ping = ping,
+                    logger = { logMessages.add(it) }
+                )
+            }
+
+            delay(1200)
+            shouldFail = true
+            delay(1200)
+            job.cancelAndJoin()
+
+            assertTrue(logMessages.any { it.contains("sent") }, "Should log success: $logMessages")
+            assertTrue(logMessages.any { it.contains("failed") }, "Should log failure: $logMessages")
+        }
     }
 }

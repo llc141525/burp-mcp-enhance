@@ -8,20 +8,30 @@ import kotlinx.coroutines.*
 import net.portswigger.mcp.db.Database
 import net.portswigger.mcp.db.ProxyHttpEntry
 import net.portswigger.mcp.db.ScannerIssueEntry
+import net.portswigger.mcp.logging.LogWriter
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class Exporter(
     private val api: MontoyaApi,
     private val database: Database,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
-    private val pollIntervalMs: Long = 5000,
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val pollIntervalMs: Long = 30_000,
     private val maxBodySize: Int = 8192
 ) {
     private var job: Job? = null
     private val _totalExported = AtomicInteger(0)
     private val _lastExportTime = AtomicLong(0)
     private val _isRunning = AtomicInteger(0)
+
+    @Volatile
+    private var isExportCycleRunning = false
+
+    @Volatile
+    private var lastProxyTimestampMs = 0L
+
+    @Volatile
+    private var lastKnownScannerIssueCount: Int? = null
 
     val stats: ExporterStats
         get() = ExporterStats(
@@ -37,11 +47,21 @@ class Exporter(
             api.logging().logToOutput("MCP Exporter started (poll interval: ${pollIntervalMs}ms)")
             while (isActive) {
                 try {
-                    exportProxyHttpHistory()
-                    exportScannerIssues()
-                    _lastExportTime.set(System.currentTimeMillis())
+                    if (!isExportCycleRunning) {
+                        isExportCycleRunning = true
+                        exportProxyHttpHistory()
+                        exportScannerIssues()
+                        // Prune old data to prevent unbounded growth
+                        database.pruneAll()
+                        isExportCycleRunning = false
+                        _lastExportTime.set(System.currentTimeMillis())
+                    } else {
+                        api.logging().logToOutput("MCP Exporter: previous cycle still running, skipping this poll")
+                    }
                 } catch (e: Exception) {
+                    isExportCycleRunning = false
                     api.logging().logToError("MCP Exporter error: ${e.message}")
+                    LogWriter.instance?.log("ERROR", "exporter", "MCP Exporter error: ${e.message}", e)
                 }
                 delay(pollIntervalMs)
             }
@@ -61,10 +81,9 @@ class Exporter(
 
     internal suspend fun exportProxyHttpHistory() {
         withContext(Dispatchers.IO) {
-            val maxId = database.getMaxProxyHttpId()
             val history = api.proxy().history()
-            val newEntries = if (maxId != null) {
-                history.filter { it.time().toEpochSecond() > maxId }
+            val newEntries = if (lastProxyTimestampMs > 0) {
+                history.filter { it.time().toInstant().toEpochMilli() > lastProxyTimestampMs }
             } else {
                 history
             }
@@ -76,21 +95,24 @@ class Exporter(
                 database.upsertProxyHttpHistory(entries)
                 _totalExported.addAndGet(entries.size)
             }
+
+            val maxTime = newEntries.maxOfOrNull { it.time().toInstant().toEpochMilli() }
+            if (maxTime != null && maxTime > lastProxyTimestampMs) {
+                lastProxyTimestampMs = maxTime
+            }
         }
     }
 
     internal suspend fun exportScannerIssues() {
         if (api.burpSuite().version().edition() != BurpSuiteEdition.PROFESSIONAL) return
         withContext(Dispatchers.IO) {
-            val maxId = database.getMaxScannerIssueId()
             val issues = api.siteMap().issues()
-            val newIssues = if (maxId != null) {
-                issues.filter { it.name().hashCode() > maxId }
-            } else {
-                issues
-            }
-            if (newIssues.isEmpty()) return@withContext
-            val entries = newIssues.mapNotNull { it.toScannerIssueEntry(maxBodySize) }
+            if (issues.isEmpty()) return@withContext
+            val currentCount = issues.size
+            if (currentCount == (lastKnownScannerIssueCount ?: -1)) return@withContext
+            lastKnownScannerIssueCount = currentCount
+
+            val entries = issues.mapNotNull { it.toScannerIssueEntry(maxBodySize) }
             if (entries.isNotEmpty()) {
                 database.upsertScannerIssues(entries)
                 _totalExported.addAndGet(entries.size)
@@ -111,6 +133,7 @@ private fun ProxyHttpRequestResponse.toProxyHttpEntry(maxBodySize: Int): ProxyHt
         val request = this.request()
         val response = this.response()
         val httpService = request.httpService()
+        val method = request.method()
         val url = "${if (httpService.secure()) "https" else "http"}://${httpService.host()}${request.path()}"
 
         val requestHeaders = request.headers().joinToString("\r\n") { "${it.name()}: ${it.value()}" }
@@ -122,7 +145,7 @@ private fun ProxyHttpRequestResponse.toProxyHttpEntry(maxBodySize: Int): ProxyHt
 
         ProxyHttpEntry(
             id = this.time().toEpochSecond().toInt().coerceAtLeast(0),
-            method = request.method(),
+            method = method,
             status = response?.statusCode()?.toInt(),
             url = url,
             requestHeaders = requestHeaders,
@@ -131,9 +154,11 @@ private fun ProxyHttpRequestResponse.toProxyHttpEntry(maxBodySize: Int): ProxyHt
             responseBody = responseBody,
             contentType = contentType,
             paramNames = paramNames?.joinToString(","),
-            capturedAt = System.currentTimeMillis()
+            capturedAt = System.currentTimeMillis(),
+            dedupKey = Database.computeDedupKey(method, url)
         )
     } catch (e: Exception) {
+        LogWriter.instance?.log("WARN", "exporter", "Failed to convert proxy entry: ${e.message}", e)
         null
     }
 }
@@ -154,6 +179,7 @@ private fun AuditIssue.toScannerIssueEntry(maxBodySize: Int): ScannerIssueEntry?
             capturedAt = System.currentTimeMillis()
         )
     } catch (e: Exception) {
+        LogWriter.instance?.log("WARN", "exporter", "Failed to convert scanner issue: ${e.message}", e)
         null
     }
 }

@@ -1166,6 +1166,24 @@ class ToolsKtTest {
         }
 
         @Test
+        fun `tool error should contain meaningful message when exception occurs`() {
+            runBlocking {
+                val result = client.callTool(
+                    "url_encode", mapOf(
+                        "content" to mapOf("nested" to "value")
+                    )
+                )
+                assertNotNull(result, "Tool result should not be null")
+                val textContent = result?.content?.firstOrNull() as? TextContent
+                assertNotNull(textContent, "Should have text content")
+                val text = textContent!!.text ?: ""
+                assertTrue(text.startsWith("Error: "), "Error should start with 'Error: ': $text")
+                // Error message should not be just "null" or empty
+                assertFalse(text == "Error: null" || text == "Error: ", "Error should contain meaningful message, got: $text")
+            }
+        }
+
+        @Test
         fun `mcpPaginatedTool should cap count at DEFAULT_MAX_PAGE_SIZE`() {
             val proxy = mockk<Proxy>()
             val proxyHistory = (1..50).map { i ->

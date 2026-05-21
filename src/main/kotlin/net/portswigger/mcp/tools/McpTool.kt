@@ -10,6 +10,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
+import net.portswigger.mcp.logging.LogWriter
 import net.portswigger.mcp.schema.asInputSchema
 import kotlin.experimental.ExperimentalTypeInference
 
@@ -87,8 +88,9 @@ inline fun <reified I : Any> Server.mcpTool(
                     isError = true
                 )
             } catch (e: Exception) {
+                LogWriter.instance?.log("ERROR", "tool", "Tool $toolName failed: ${e.message}", e)
                 CallToolResult(
-                    content = listOf(TextContent("Error: ${e.message}")),
+                    content = listOf(TextContent("Error: ${e.message ?: e::class.simpleName ?: "Unknown error"}")),
                     isError = true
                 )
             }
@@ -206,6 +208,12 @@ inline fun Server.mcpTool(
                     content = listOf(TextContent("Error: Tool execution timed out after ${DEFAULT_TOOL_TIMEOUT_MS / 1000}s")),
                     isError = true
                 )
+            } catch (e: Exception) {
+                LogWriter.instance?.log("ERROR", "tool", "Tool $name failed: ${e.message}", e)
+                CallToolResult(
+                    content = listOf(TextContent("Error: ${e.message ?: e::class.simpleName ?: "Unknown error"}")),
+                    isError = true
+                )
             }
         }
     )
@@ -228,6 +236,12 @@ inline fun Server.mcpTool(
             } catch (e: TimeoutCancellationException) {
                 CallToolResult(
                     content = listOf(TextContent("Error: Tool execution timed out after ${DEFAULT_TOOL_TIMEOUT_MS / 1000}s")),
+                    isError = true
+                )
+            } catch (e: Exception) {
+                LogWriter.instance?.log("ERROR", "tool", "Tool $name failed: ${e.message}", e)
+                CallToolResult(
+                    content = listOf(TextContent("Error: ${e.message ?: e::class.simpleName ?: "Unknown error"}")),
                     isError = true
                 )
             }

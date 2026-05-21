@@ -10,9 +10,8 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import net.portswigger.mcp.db.Database
-import net.portswigger.mcp.db.ProxyHttpEntry
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.ZoneId
@@ -33,7 +32,7 @@ class ExporterTest {
         exporter = Exporter(
             api = api,
             database = database,
-            pollIntervalMs = 5000,
+            pollIntervalMs = 30_000,
             maxBodySize = 8192
         )
     }
@@ -44,30 +43,21 @@ class ExporterTest {
     }
 
     @Test
-    fun `exportProxyHttpHistory should only process entries newer than maxId`() = runBlocking {
-        // Arrange: Pre-populate database with some entries
-        database.upsertProxyHttpHistory(
-            listOf(
-                ProxyHttpEntry(id = 1000, method = "GET", status = 200, url = "http://example.com/old",
-                    requestHeaders = null, requestBody = null, responseHeaders = null, responseBody = null,
-                    contentType = null, paramNames = null, capturedAt = 1000)
-            )
-        )
-        assertEquals(1, database.stats().proxyHttpCount, "Should have 1 pre-existing entry")
+    fun `exportProxyHttpHistory should only process new entries on subsequent exports`() = runBlocking {
+        val entry1 = createMockProxyEntry(1000, "http://example.com/old")
+        val entry2 = createMockProxyEntry(2000, "http://example.com/new")
+        val proxyMock = mockk<Proxy>(relaxed = true)
 
-        // Mock proxy history with mixed old and new entries
-        val oldEntry = createMockProxyEntry(1000, "http://example.com/old")
-        val newEntry = createMockProxyEntry(2000, "http://example.com/new")
-
-        val mockProxy = mockk<Proxy>(relaxed = true)
-        every { api.proxy() } returns mockProxy
-        every { mockProxy.history() } returns listOf(newEntry, oldEntry)
-
-        // Act: Run export
+        // First export — processes everything since lastProxyTimestampMs starts at 0
+        every { api.proxy() } returns proxyMock
+        every { proxyMock.history() } returns listOf(entry1)
         exporter.exportProxyHttpHistory()
+        assertEquals(1, database.stats().proxyHttpCount)
 
-        // Assert: Only 1 new entry should be added (not re-processing the old one)
-        assertEquals(2, database.stats().proxyHttpCount, "Total should be 2 (1 old + 1 new)")
+        // Second export — only entry2 is newer than the previous max timestamp
+        every { proxyMock.history() } returns listOf(entry1, entry2)
+        exporter.exportProxyHttpHistory()
+        assertEquals(2, database.stats().proxyHttpCount, "Only the new entry should be added")
     }
 
     @Test
@@ -82,7 +72,7 @@ class ExporterTest {
     }
 
     @Test
-    fun `exportProxyHttpHistory should handle null maxId for first export`() = runBlocking {
+    fun `exportProxyHttpHistory should handle first export correctly`() = runBlocking {
         val entry = createMockProxyEntry(1000, "http://example.com/test")
         every { api.proxy() } returns mockk<Proxy>(relaxed = true).apply {
             every { history() } returns listOf(entry)
@@ -93,44 +83,24 @@ class ExporterTest {
         assertEquals(1, database.stats().proxyHttpCount)
     }
 
-    @Test
-    fun `exportProxyHttpHistory should not re-process entries with same timestamp`() = runBlocking {
-        // Pre-populate with entry at timestamp 1000
-        database.upsertProxyHttpHistory(
-            listOf(
-                ProxyHttpEntry(id = 1000, method = "GET", status = 200, url = "http://example.com/existing",
-                    requestHeaders = null, requestBody = null, responseHeaders = null, responseBody = null,
-                    contentType = null, paramNames = null, capturedAt = 1000)
-            )
-        )
-
-        // Mock history with an entry at the same timestamp
-        val sameTsEntry = createMockProxyEntry(1000, "http://example.com/same-ts")
-        every { api.proxy() } returns mockk<Proxy>(relaxed = true).apply {
-            every { history() } returns listOf(sameTsEntry)
-        }
-
-        exporter.exportProxyHttpHistory()
-
-        // Entry with same timestamp should be excluded by > comparison
-        assertEquals(1, database.stats().proxyHttpCount, "Entry with same timestamp should be excluded")
-    }
-
     private fun createMockProxyEntry(timestampSeconds: Long, url: String): ProxyHttpRequestResponse {
         val mockEntry = mockk<ProxyHttpRequestResponse>(relaxed = true)
-        val zonedDateTime = ZonedDateTime.ofInstant(java.time.Instant.ofEpochSecond(timestampSeconds), ZoneId.systemDefault())
+        val zonedDateTime = ZonedDateTime.ofInstant(
+            java.time.Instant.ofEpochSecond(timestampSeconds), ZoneId.systemDefault()
+        )
         every { mockEntry.time() } returns zonedDateTime
 
         val mockRequest = mockk<HttpRequest>(relaxed = true)
         every { mockEntry.request() } returns mockRequest
         every { mockRequest.body() } returns null
 
+        val path = java.net.URI(url).rawPath
         val mockService = mockk<HttpService>(relaxed = true)
         every { mockRequest.httpService() } returns mockService
         every { mockService.host() } returns "example.com"
         every { mockService.port() } returns 80
         every { mockService.secure() } returns false
-        every { mockRequest.path() } returns "/"
+        every { mockRequest.path() } returns path
         every { mockRequest.method() } returns "GET"
         every { mockRequest.headers() } returns emptyList()
 

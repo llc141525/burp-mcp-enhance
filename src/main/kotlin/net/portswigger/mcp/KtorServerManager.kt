@@ -8,25 +8,36 @@ import io.ktor.server.netty.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.ktor.server.sse.*
+import io.ktor.sse.*
 import io.modelcontextprotocol.kotlin.sdk.Implementation
 import io.modelcontextprotocol.kotlin.sdk.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
-import io.modelcontextprotocol.kotlin.sdk.server.mcp
+import io.modelcontextprotocol.kotlin.sdk.server.SseServerTransport
 import kotlinx.coroutines.*
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.db.Database
 import net.portswigger.mcp.exporter.Exporter
+import net.portswigger.mcp.logging.LogWriter
 import net.portswigger.mcp.queue.FileQueue
 import net.portswigger.mcp.queue.MessageQueue
 import net.portswigger.mcp.tools.registerTools
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.time.Duration.Companion.seconds
 
-class KtorServerManager(private val api: MontoyaApi, private val dbPath: String = ":memory:") : ServerManager {
+class KtorServerManager(
+    private val api: MontoyaApi,
+    private val dbPath: String = ":memory:",
+    private val logWriter: LogWriter? = null
+) : ServerManager {
 
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newFixedThreadPool(2) { r ->
@@ -34,6 +45,7 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
     }
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var heartbeatJob: Job? = null
+    private var healthMonitorJob: Job? = null
     private var restartJob: Job? = null
     @Volatile
     var messageQueue: MessageQueue? = null
@@ -48,8 +60,33 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
     var exporter: Exporter? = null
         private set
 
+    @Volatile
+    var activeSseConnections = AtomicInteger(0)
+        private set
+
+    private val sseTransports = ConcurrentHashMap<String, SseServerTransport>()
+
     private val currentState = AtomicReference<ServerState>(ServerState.Stopped)
     private val maxRestartAttempts = 3
+
+    private fun logInfo(cat: String, msg: String) {
+        api.logging().logToOutput(msg)
+        logWriter?.log("INFO", cat, msg)
+    }
+
+    private fun logError(cat: String, msg: String, err: Throwable? = null) {
+        if (err != null) {
+            api.logging().logToError(err)
+        } else {
+            api.logging().logToError(msg)
+        }
+        logWriter?.log("ERROR", cat, msg, err)
+    }
+
+    private fun logWarn(cat: String, msg: String) {
+        api.logging().logToOutput(msg)
+        logWriter?.log("WARN", cat, msg)
+    }
 
     override fun start(config: McpConfig, callback: (ServerState) -> Unit) {
         currentState.set(ServerState.Starting)
@@ -70,19 +107,19 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 val mcpServer = createMcpServer()
                 server = createEmbeddedServer(config, mcpServer)
 
-                api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
+                logInfo("server", "Started MCP server on ${config.host}:${config.port}")
                 currentState.set(ServerState.Running)
                 callback(ServerState.Running)
 
-                // Start keepalive heartbeat
+                // Start health monitoring
                 startHeartbeat(config, mcpServer)
 
             } catch (e: Exception) {
-                api.logging().logToError(e)
+                logError("server", "Server start failed: ${e.message}", e)
                 currentState.set(ServerState.Failed(e))
                 callback(ServerState.Failed(e))
 
-                // Schedule automatic restart with exponential backoff
+                // Schedule automatic restart with persistent backoff
                 scheduleRestart(config, callback)
             }
         }
@@ -94,6 +131,8 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
 
         heartbeatJob?.cancel()
         heartbeatJob = null
+        healthMonitorJob?.cancel()
+        healthMonitorJob = null
         restartJob?.cancel()
         restartJob = null
 
@@ -105,12 +144,12 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 val mcpServer = createMcpServer()
                 server = createEmbeddedServer(config, mcpServer)
 
-                api.logging().logToOutput("Restarted MCP server on ${config.host}:${config.port}")
+                logInfo("server", "Restarted MCP server on ${config.host}:${config.port}")
                 currentState.set(ServerState.Running)
                 callback(ServerState.Running)
                 startHeartbeat(config, mcpServer)
             } catch (e: Exception) {
-                api.logging().logToError(e)
+                logError("server", "Server restart failed: ${e.message}", e)
                 currentState.set(ServerState.Failed(e))
                 callback(ServerState.Failed(e))
                 scheduleRestart(config, callback)
@@ -127,7 +166,20 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
     )
 
     private fun createEmbeddedServer(config: McpConfig, mcpServer: Server): EmbeddedServer<*, *> {
-        return embeddedServer(Netty, port = config.port, host = config.host) {
+        val env = applicationEnvironment { }
+
+        // Register tools before any SSE connections are accepted
+        mcpServer.registerTools(api, config, messageQueue, fileQueue, database, exporter)
+
+        return embeddedServer(Netty, env, configure = {
+            connector {
+                host = config.host
+                port = config.port
+            }
+            tcpKeepAlive = true
+            requestReadTimeoutSeconds = 3600  // SSE connections are long-lived
+            responseWriteTimeoutSeconds = 3600
+        }) {
             install(CORS) {
                 allowHost("localhost:${config.port}")
                 allowHost("127.0.0.1:${config.port}")
@@ -147,6 +199,20 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 maxAgeInSeconds = 3600
             }
 
+            // SSE connection tracking
+            intercept(ApplicationCallPipeline.Monitoring) {
+                if (call.request.uri.startsWith("/sse")) {
+                    val count = activeSseConnections.incrementAndGet()
+                    logInfo("server", "SSE client connected (active: $count)")
+                    try {
+                        proceed()
+                    } finally {
+                        val afterCount = activeSseConnections.decrementAndGet()
+                        logInfo("server", "SSE client disconnected (active: $afterCount)")
+                    }
+                }
+            }
+
             intercept(ApplicationCallPipeline.Call) {
                 val origin = call.request.header("Origin")
                 val host = call.request.header("Host")
@@ -154,23 +220,23 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 val userAgent = call.request.header("User-Agent")
 
                 if (origin != null && !isValidOrigin(origin, config)) {
-                    api.logging().logToOutput("Blocked DNS rebinding attack from origin: $origin")
+                    logWarn("security", "Blocked DNS rebinding attack from origin: $origin")
                     call.respond(HttpStatusCode.Forbidden)
                     return@intercept
                 } else if (isBrowserRequest(userAgent)) {
-                    api.logging().logToOutput("Blocked browser request without Origin header")
+                    logWarn("security", "Blocked browser request without Origin header")
                     call.respond(HttpStatusCode.Forbidden)
                     return@intercept
                 }
 
                 if (host != null && !isValidHost(host, config)) {
-                    api.logging().logToOutput("Blocked DNS rebinding attack from host: $host")
+                    logWarn("security", "Blocked DNS rebinding attack from host: $host")
                     call.respond(HttpStatusCode.Forbidden)
                     return@intercept
                 }
 
                 if (referer != null && !isValidReferer(referer, config)) {
-                    api.logging().logToOutput("Blocked suspicious request from referer: $referer")
+                    logWarn("security", "Blocked suspicious request from referer: $referer")
                     call.respond(HttpStatusCode.Forbidden)
                     return@intercept
                 }
@@ -181,27 +247,102 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 call.response.header("Content-Security-Policy", "default-src 'none'")
             }
 
-            mcp {
-                mcpServer
-            }
+            install(SSE)
 
-            mcpServer.registerTools(api, config, messageQueue, fileQueue, database, exporter)
+            routing {
+                // GET is handled without a path prefix — the MCP client connects to the base URL.
+                sse {
+                    // Ktor's built-in SSE heartbeat sends periodic SSE comments to keep the
+                    // connection alive. TCP keepalive alone is insufficient — many proxies
+                    // and NATs require application-level data.
+                    heartbeat {
+                        period = config.keepaliveIntervalSec.seconds
+                        event = ServerSentEvent(comments = "keepalive")
+                    }
+
+                    val transport = SseServerTransport("/sse", this)
+                    sseTransports[transport.sessionId] = transport
+                    try {
+                        mcpServer.connect(transport)
+                    } finally {
+                        sseTransports.remove(transport.sessionId)
+                    }
+                }
+
+                post("/sse") {
+                    val sessionId = call.request.queryParameters["sessionId"]
+                    if (sessionId == null) {
+                        call.respond(HttpStatusCode.BadRequest, "sessionId query parameter is not provided")
+                        return@post
+                    }
+
+                    val transport = sseTransports[sessionId]
+                    if (transport == null) {
+                        logWarn("server", "Session not found for sessionId: $sessionId")
+                        call.respond(HttpStatusCode.NotFound, "Session not found")
+                        return@post
+                    }
+
+                    transport.handlePostMessage(call)
+                }
+            }
         }.apply {
             start(wait = false)
         }
     }
 
+    internal suspend fun heartbeatPing(
+        keepaliveIntervalSec: Int,
+        ping: suspend () -> Unit,
+        logger: (String) -> Unit
+    ) {
+        while (true) {
+            delay((keepaliveIntervalSec * 1000L).coerceAtLeast(100))
+            try {
+                ping()
+                logger("MCP keepalive ping sent")
+            } catch (e: Exception) {
+                logger("MCP keepalive ping failed: ${e.message}")
+                logWriter?.log("WARN", "heartbeat", "Ping failed: ${e.message}", e)
+            }
+        }
+    }
+
     private fun startHeartbeat(config: McpConfig, mcpServer: Server) {
         heartbeatJob?.cancel()
+        healthMonitorJob?.cancel()
         if (!config.keepaliveEnabled) return
 
-        heartbeatJob = scope.launch {
+        if (logWriter == null) {
+            // Test environment — no health monitoring
+            return
+        }
+
+        val healthMonitor = HealthMonitor(
+            serverCheck = {
+                server != null && currentState.get() == ServerState.Running
+            },
+            onUnhealthy = {
+                logWarn("heartbeat", "Health monitor triggering restart")
+                restart(config) { state ->
+                    if (state is ServerState.Failed) {
+                        logError("heartbeat", "Auto-restart from health monitor failed: ${state.exception.message}", state.exception)
+                    }
+                }
+            },
+            logWriter = logWriter
+        )
+
+        // Run health checks periodically. SSE keepalive is handled by Ktor's built-in
+        // ServerSSESession.heartbeat which sends SSE comments over each active connection.
+        healthMonitorJob = scope.launch {
             while (isActive) {
-                delay(config.keepaliveIntervalSec * 1000L)
-                api.logging().logToOutput("MCP keepalive heartbeat")
-                // SSE keepalive is handled by Ktor server and MCP SDK at the transport level.
-                // This heartbeat ensures the server lifecycle coroutine stays active and provides
-                // visibility into server status through logs.
+                delay((config.keepaliveIntervalSec * 1000L).coerceAtLeast(100))
+                try {
+                    healthMonitor.check()
+                } catch (e: Exception) {
+                    logWriter?.log("WARN", "heartbeat", "Health check error: ${e.message}", e)
+                }
             }
         }
     }
@@ -211,22 +352,39 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
 
         val attempts = currentState.get()
         if (attempts is ServerState.Failed && attempts.exception is InterruptedException) {
-            api.logging().logToOutput("Server interrupted, not scheduling restart")
+            logInfo("server", "Server interrupted, not scheduling restart")
             return
         }
 
         restartJob = scope.launch {
-            for (i in 1..maxRestartAttempts) {
-                val delayMs = 1000L * (1L shl (i - 1))
-                api.logging().logToOutput("Automatic restart attempt $i/$maxRestartAttempts in ${delayMs}ms")
+            var attempt = 0
+            while (isActive) {
+                attempt++
+                val delayMs = if (attempt <= maxRestartAttempts) {
+                    1000L * (1L shl (attempt - 1)) // 1s, 2s, 4s
+                } else {
+                    val extra = attempt - maxRestartAttempts
+                    minOf(30_000L * (1L shl (extra - 1).coerceAtMost(3)), 300_000L)
+                    // 30s, 60s, 120s, 240s, 300s, 300s...
+                }
+
+                logInfo("server", "Automatic restart attempt $attempt in ${delayMs}ms")
                 delay(delayMs)
 
                 if (!isActive) return@launch
 
-                api.logging().logToOutput("Automatic restart attempt $i/$maxRestartAttempts")
+                logInfo("server", "Automatic restart attempt $attempt")
                 start(config, callback)
+
+                if (currentState.get() == ServerState.Running) {
+                    logInfo("server", "Restart succeeded on attempt $attempt")
+                    return@launch
+                }
+
+                if (attempt == maxRestartAttempts) {
+                    logWarn("server", "Fast retry exhausted ($maxRestartAttempts attempts), switching to persistent retry")
+                }
             }
-            api.logging().logToOutput("Max restart attempts reached ($maxRestartAttempts)")
         }
     }
 
@@ -236,6 +394,8 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
 
         heartbeatJob?.cancel()
         heartbeatJob = null
+        healthMonitorJob?.cancel()
+        healthMonitorJob = null
         restartJob?.cancel()
         restartJob = null
 
@@ -251,11 +411,11 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
                 messageQueue = null
                 fileQueue?.shutdown()
                 fileQueue = null
-                api.logging().logToOutput("Stopped MCP server")
+                logInfo("server", "Stopped MCP server")
                 currentState.set(ServerState.Stopped)
                 callback(ServerState.Stopped)
             } catch (e: Exception) {
-                api.logging().logToError(e)
+                logError("server", "Server stop failed: ${e.message}", e)
                 currentState.set(ServerState.Failed(e))
                 callback(ServerState.Failed(e))
             }
@@ -265,6 +425,8 @@ class KtorServerManager(private val api: MontoyaApi, private val dbPath: String 
     override fun shutdown() {
         heartbeatJob?.cancel()
         heartbeatJob = null
+        healthMonitorJob?.cancel()
+        healthMonitorJob = null
         restartJob?.cancel()
         restartJob = null
         scope.cancel()

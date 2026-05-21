@@ -1,9 +1,12 @@
 package net.portswigger.mcp.db
 
+import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
 
 class Database(dbPath: String = ":memory:") {
+
+    private val dedupWindowMs: Long = 300_000 // 5 minutes
 
     init {
         Class.forName("org.sqlite.JDBC")
@@ -16,6 +19,7 @@ class Database(dbPath: String = ":memory:") {
             close()
         }
         createTables(conn)
+        migrateSchema(conn)
     }
 
     private fun createTables(conn: Connection) {
@@ -46,37 +50,125 @@ class Database(dbPath: String = ":memory:") {
                     captured_at INTEGER NOT NULL
                 )
             """.trimIndent())
+            execute("""
+                CREATE TABLE IF NOT EXISTS large_responses (
+                    id TEXT PRIMARY KEY,
+                    data BLOB NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    original_size INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )
+            """.trimIndent())
             close()
+        }
+    }
+
+    private fun migrateSchema(conn: Connection) {
+        conn.createStatement().apply {
+            // Add dedup columns — safe to ignore if already present
+            try { execute("ALTER TABLE proxy_http_history ADD COLUMN dedup_key TEXT") } catch (e: Exception) {
+                net.portswigger.mcp.logging.LogWriter.instance?.log("WARN", "db", "Migration ALTER dedup_key: ${e.message}", e)
+            }
+            try { execute("ALTER TABLE proxy_http_history ADD COLUMN hit_count INTEGER DEFAULT 1") } catch (e: Exception) {
+                net.portswigger.mcp.logging.LogWriter.instance?.log("WARN", "db", "Migration ALTER hit_count: ${e.message}", e)
+            }
+            try { execute("CREATE INDEX IF NOT EXISTS idx_history_dedup ON proxy_http_history(dedup_key, captured_at)") } catch (e: Exception) {
+                net.portswigger.mcp.logging.LogWriter.instance?.log("WARN", "db", "Migration CREATE INDEX: ${e.message}", e)
+            }
+            close()
+        }
+    }
+
+    companion object {
+        fun computeDedupKey(method: String, url: String): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            return digest.digest("$method|$url".toByteArray()).joinToString("") { "%02x".format(it) }
         }
     }
 
     fun upsertProxyHttpHistory(entries: List<ProxyHttpEntry>) {
         connection.autoCommit = false
         try {
-            val stmt = connection.prepareStatement(
-                "INSERT OR REPLACE INTO proxy_http_history " +
-                "(id, method, status, url, request_headers, request_body, response_headers, response_body, " +
-                "content_type, param_names, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            // Split entries into new vs duplicates within dedup window
+            val newEntries = mutableListOf<ProxyHttpEntry>()
+            val duplicateDedupKeys = mutableListOf<String>()
+
+            val dedupCutoff = System.currentTimeMillis() - dedupWindowMs
+
+            val dedupCheckStmt = connection.prepareStatement(
+                "SELECT id FROM proxy_http_history WHERE dedup_key = ? AND captured_at > ? LIMIT 1"
             )
+
             try {
                 for (entry in entries) {
-                    stmt.setInt(1, entry.id)
-                    stmt.setString(2, entry.method)
-                    if (entry.status != null) stmt.setInt(3, entry.status) else stmt.setNull(3, java.sql.Types.INTEGER)
-                    stmt.setString(4, entry.url)
-                    stmt.setString(5, entry.requestHeaders)
-                    stmt.setString(6, entry.requestBody)
-                    stmt.setString(7, entry.responseHeaders)
-                    stmt.setString(8, entry.responseBody)
-                    stmt.setString(9, entry.contentType)
-                    stmt.setString(10, entry.paramNames)
-                    stmt.setLong(11, entry.capturedAt)
-                    stmt.addBatch()
+                    val dedupKey = entry.dedupKey
+                    if (dedupKey != null) {
+                        dedupCheckStmt.setString(1, dedupKey)
+                        dedupCheckStmt.setLong(2, dedupCutoff)
+                        val rs = dedupCheckStmt.executeQuery()
+                        val found = rs.next()
+                        rs.close()
+                        if (found) {
+                            duplicateDedupKeys.add(dedupKey)
+                        } else {
+                            newEntries.add(entry)
+                        }
+                    } else {
+                        newEntries.add(entry)
+                    }
                 }
-                stmt.executeBatch()
             } finally {
-                stmt.close()
+                dedupCheckStmt.close()
             }
+
+            // Batch insert new entries
+            if (newEntries.isNotEmpty()) {
+                val insertStmt = connection.prepareStatement(
+                    "INSERT OR REPLACE INTO proxy_http_history " +
+                    "(id, method, status, url, request_headers, request_body, response_headers, response_body, " +
+                    "content_type, param_names, captured_at, dedup_key, hit_count) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                try {
+                    for (entry in newEntries) {
+                        insertStmt.setInt(1, entry.id)
+                        insertStmt.setString(2, entry.method)
+                        if (entry.status != null) insertStmt.setInt(3, entry.status) else insertStmt.setNull(3, java.sql.Types.INTEGER)
+                        insertStmt.setString(4, entry.url)
+                        insertStmt.setString(5, entry.requestHeaders)
+                        insertStmt.setString(6, entry.requestBody)
+                        insertStmt.setString(7, entry.responseHeaders)
+                        insertStmt.setString(8, entry.responseBody)
+                        insertStmt.setString(9, entry.contentType)
+                        insertStmt.setString(10, entry.paramNames)
+                        insertStmt.setLong(11, entry.capturedAt)
+                        if (entry.dedupKey != null) insertStmt.setString(12, entry.dedupKey) else insertStmt.setNull(12, java.sql.Types.VARCHAR)
+                        insertStmt.setInt(13, 1)
+                        insertStmt.addBatch()
+                    }
+                    insertStmt.executeBatch()
+                } finally {
+                    insertStmt.close()
+                }
+            }
+
+            // Increment hit_count for dedup matches
+            if (duplicateDedupKeys.isNotEmpty()) {
+                val updateStmt = connection.prepareStatement(
+                    "UPDATE proxy_http_history SET hit_count = hit_count + 1 WHERE dedup_key = ?"
+                )
+                try {
+                    for (dedupKey in duplicateDedupKeys) {
+                        updateStmt.setString(1, dedupKey)
+                        updateStmt.addBatch()
+                    }
+                    updateStmt.executeBatch()
+                } finally {
+                    updateStmt.close()
+                }
+            }
+
             connection.commit()
         } finally {
             connection.autoCommit = true
@@ -114,7 +206,7 @@ class Database(dbPath: String = ":memory:") {
     fun listProxyHttpHistory(offset: Int = 0, count: Int = 30): List<ProxyHttpSummary> {
         connection.autoCommit = true
         val stmt = connection.prepareStatement(
-            "SELECT id, method, status, url, content_type, param_names FROM proxy_http_history ORDER BY id DESC LIMIT ? OFFSET ?"
+            "SELECT id, method, status, url, content_type, param_names, COALESCE(hit_count, 1) as hit_count FROM proxy_http_history ORDER BY id DESC LIMIT ? OFFSET ?"
         )
         try {
             stmt.setInt(1, count)
@@ -130,7 +222,8 @@ class Database(dbPath: String = ":memory:") {
                             status = rs.getObject("status") as? Int,
                             url = rs.getString("url"),
                             contentType = rs.getString("content_type"),
-                            paramNames = rs.getString("param_names")?.split(",")?.filter { it.isNotEmpty() }
+                            paramNames = rs.getString("param_names")?.split(",")?.filter { it.isNotEmpty() },
+                            hitCount = rs.getInt("hit_count")
                         )
                     )
                 }
@@ -148,7 +241,7 @@ class Database(dbPath: String = ":memory:") {
         connection.autoCommit = true
         val placeholders = ids.joinToString(",") { "?" }
         val stmt = connection.prepareStatement(
-            "SELECT * FROM proxy_http_history WHERE id IN ($placeholders) ORDER BY id DESC"
+            "SELECT *, COALESCE(hit_count, 1) as hit_count FROM proxy_http_history WHERE id IN ($placeholders) ORDER BY id DESC"
         )
         try {
             ids.forEachIndexed { index, id -> stmt.setInt(index + 1, id) }
@@ -168,7 +261,8 @@ class Database(dbPath: String = ":memory:") {
                             responseBody = rs.getString("response_body"),
                             contentType = rs.getString("content_type"),
                             paramNames = rs.getString("param_names"),
-                            capturedAt = rs.getLong("captured_at")
+                            capturedAt = rs.getLong("captured_at"),
+                            hitCount = rs.getInt("hit_count")
                         )
                     )
                 }
@@ -293,7 +387,11 @@ class Database(dbPath: String = ":memory:") {
             val scannerCount = if (scannerRs.next()) scannerRs.getInt(1) else 0
             scannerRs.close()
 
-            return DbStats(proxyHttpCount = httpCount, scannerIssueCount = scannerCount)
+            val blobRs = stmt.executeQuery("SELECT COUNT(*) FROM large_responses")
+            val blobCount = if (blobRs.next()) blobRs.getInt(1) else 0
+            blobRs.close()
+
+            return DbStats(proxyHttpCount = httpCount, scannerIssueCount = scannerCount, blobCount = blobCount)
         } finally {
             stmt.close()
         }
@@ -311,9 +409,105 @@ class Database(dbPath: String = ":memory:") {
         }
     }
 
+    fun pruneProxyHttpHistory(maxRows: Int = 100_000) {
+        connection.autoCommit = true
+        val stmt = connection.prepareStatement(
+            "DELETE FROM proxy_http_history WHERE id <= (SELECT id FROM proxy_http_history ORDER BY id DESC LIMIT 1 OFFSET ?)"
+        )
+        try {
+            stmt.setInt(1, maxRows)
+            stmt.execute()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun pruneScannerIssues(maxRows: Int = 10_000) {
+        connection.autoCommit = true
+        val stmt = connection.prepareStatement(
+            "DELETE FROM scanner_issues WHERE id <= (SELECT id FROM scanner_issues ORDER BY id DESC LIMIT 1 OFFSET ?)"
+        )
+        try {
+            stmt.setInt(1, maxRows)
+            stmt.execute()
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun pruneAll(maxHttpRows: Int = 100_000, maxScannerRows: Int = 10_000) {
+        pruneProxyHttpHistory(maxHttpRows)
+        pruneScannerIssues(maxScannerRows)
+        pruneBlobs()
+    }
+
     fun clearAll() {
         clearProxyHttpHistory()
         clearScannerIssues()
+        clearBlobs()
+    }
+
+    // ─── BLOB Store (large response storage) ───
+
+    fun storeBlob(data: ByteArray, contentType: String = "application/octet-stream", ttlMs: Long = 600_000): String {
+        val id = java.util.UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        connection.autoCommit = true
+        val stmt = connection.prepareStatement(
+            "INSERT INTO large_responses (id, data, content_type, original_size, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        try {
+            stmt.setString(1, id)
+            stmt.setBytes(2, data)
+            stmt.setString(3, contentType)
+            stmt.setInt(4, data.size)
+            stmt.setLong(5, now)
+            stmt.setLong(6, now + ttlMs)
+            stmt.execute()
+        } finally {
+            stmt.close()
+        }
+        return id
+    }
+
+    fun readBlob(blobId: String, offset: Int = 0, limit: Int = -1): ByteArray? {
+        connection.autoCommit = true
+        val stmt = connection.prepareStatement("SELECT data, original_size FROM large_responses WHERE id = ?")
+        try {
+            stmt.setString(1, blobId)
+            val rs = stmt.executeQuery()
+            if (!rs.next()) return null
+            val bytes = rs.getBytes("data")
+            if (offset >= bytes.size) return ByteArray(0)
+            val end = if (limit < 0 || (offset + limit) > bytes.size) bytes.size else (offset + limit)
+            return bytes.copyOfRange(offset, end)
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun readBlobAsString(blobId: String, offset: Int = 0, limit: Int = -1): String? {
+        return readBlob(blobId, offset, limit)?.let { String(it) }
+    }
+
+    fun deleteBlob(blobId: String): Boolean {
+        connection.autoCommit = true
+        val stmt = connection.prepareStatement("DELETE FROM large_responses WHERE id = ?")
+        try {
+            stmt.setString(1, blobId)
+            return stmt.executeUpdate() > 0
+        } finally {
+            stmt.close()
+        }
+    }
+
+    fun pruneBlobs() {
+        connection.autoCommit = true
+        connection.createStatement().execute("DELETE FROM large_responses WHERE expires_at < ${System.currentTimeMillis()}")
+    }
+
+    fun clearBlobs() {
+        connection.createStatement().use { it.execute("DELETE FROM large_responses") }
     }
 
     fun close() {
@@ -327,7 +521,8 @@ data class ProxyHttpSummary(
     val status: Int?,
     val url: String,
     val contentType: String?,
-    val paramNames: List<String>?
+    val paramNames: List<String>?,
+    val hitCount: Int = 1
 )
 
 data class ProxyHttpEntry(
@@ -341,7 +536,9 @@ data class ProxyHttpEntry(
     val responseBody: String?,
     val contentType: String?,
     val paramNames: String?,
-    val capturedAt: Long
+    val capturedAt: Long,
+    val dedupKey: String? = null,
+    val hitCount: Int = 1
 )
 
 data class ScannerIssueSummary(
@@ -363,5 +560,6 @@ data class ScannerIssueEntry(
 
 data class DbStats(
     val proxyHttpCount: Int,
-    val scannerIssueCount: Int
+    val scannerIssueCount: Int,
+    val blobCount: Int = 0
 )

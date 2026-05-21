@@ -26,6 +26,7 @@ class McpServerIntegrationTest {
         every { persistedObject.getBoolean(any()) } returns true
         every { persistedObject.getString(any()) } returns "127.0.0.1"
         every { persistedObject.getInteger("port") } returns testPort
+        every { persistedObject.getInteger("keepaliveIntervalSec") } returns 2
         every { persistedObject.setBoolean(any(), any()) } returns Unit
         every { persistedObject.setString(any(), any()) } returns Unit
         every { persistedObject.setInteger(any(), any()) } returns Unit
@@ -40,6 +41,7 @@ class McpServerIntegrationTest {
 
     @BeforeEach
     fun setup() {
+        serverStarted = false
         serverManager.start(config) { state ->
             if (state is ServerState.Running) {
                 serverStarted = true
@@ -78,18 +80,39 @@ class McpServerIntegrationTest {
         try {
             client.connectToServer("http://127.0.0.1:${testPort}")
             assertTrue(client.isConnected(), "Client should be connected to server")
-            
+
             val tools = client.listTools()
             assertFalse(tools.isEmpty(), "Server should have registered tools")
-            
+
             val toolNames = tools.map { it.name }
             assertTrue(toolNames.contains("output_project_options"), "Server should have output_project_options tool")
             assertTrue(toolNames.contains("output_user_options"), "Server should have output_user_options tool")
-            
+
             val pingResult = client.ping()
             assertNotNull(pingResult, "Ping should return a result")
         } catch (e: Exception) {
             fail("Connection failed: ${e.message}")
         }
+    }
+
+    @Test
+    fun `SSE client can reconnect and call tools after being idle`() = runBlocking {
+        client.connectToServer("http://127.0.0.1:${testPort}")
+        assertTrue(client.isConnected(), "Client should be connected")
+
+        // Basic interaction
+        val tools = client.listTools()
+        assertTrue(tools.isNotEmpty(), "Tools should be accessible")
+        assertNotNull(client.ping(), "Ping should succeed")
+
+        client.close()
+        assertFalse(client.isConnected(), "Client should be disconnected after close")
+
+        // Reconnect
+        client.connectToServer("http://127.0.0.1:${testPort}")
+        assertTrue(client.isConnected(), "Client should reconnect successfully")
+
+        val toolsAfterReconnect = client.listTools()
+        assertTrue(toolsAfterReconnect.isNotEmpty(), "Tools should be accessible after reconnect")
     }
 }
