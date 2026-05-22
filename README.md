@@ -52,7 +52,7 @@
 
 ### 前提条件
 
-- Java 21+
+- **Java 21+**（必须，代理 JAR 编译目标为 Java 21）
 - `jar` 命令可用
 
 ### 构建
@@ -63,26 +63,45 @@ cd mcp-server
 ./gradlew embedProxyJar
 ```
 
-构建产物位于 `build/libs/burp-mcp-all.jar`。
+构建产物位于 `build/libs/burp-mcp-all.jar`，其中已内嵌 stdio 代理 JAR。
 
 ### 加载到 Burp
 
 1. 打开 Burp Suite → Extensions 标签
 2. 点击 Add → Extension Type 选 Java
-3. 选择 `burp-mcp-all.jar` → Next
+3. 选择 `build/libs/burp-mcp-all.jar` → Next
+4. 在 Burp 的 MCP 标签页中启用服务器
 
 ### 配置 MCP 客户端
 
-扩展启动后在 `127.0.0.1:9876` 提供 SSE 服务(别忘了改路径)：
+扩展启动后在 `127.0.0.1:9876` 提供 MCP 服务。有两种连接方式：
+
+#### 方式一：SSE 直连（简单，但可能不稳定）
 
 ```json
 {
 	"mcpServers": {
 		"burp": {
-			"command": "/path/to/java",
+			"url": "http://127.0.0.1:9876/sse"
+		}
+	}
+}
+```
+
+#### 方式二：stdio 代理（推荐，更稳定）
+
+使用内置的 `mcp-proxy-all.jar` 作为 stdio ↔ SSE 桥，MCP 客户端通过子进程通信，绕过网络连接不稳定的问题。
+
+需要 Java 21 运行代理 JAR（如果系统默认 Java 不是 21，指定完整路径）：
+
+```json
+{
+	"mcpServers": {
+		"burp": {
+			"command": "C:\\Users\\用户名\\.jdks\\ms-21.0.6\\bin\\java.exe",
 			"args": [
 				"-jar",
-				"/path/to/mcp-proxy-all.jar",
+				"C:\\Users\\用户名\\AppData\\Roaming\\BurpSuite\\mcp-proxy\\mcp-proxy-all.jar",
 				"--sse-url",
 				"http://127.0.0.1:9876"
 			]
@@ -91,7 +110,9 @@ cd mcp-server
 }
 ```
 
-也可以在 Burp UI 中点击"安装到 Claude Desktop"自动配置。
+也可以从 Burp UI 中点击 **"提取服务器代理 jar"** 获取 `mcp-proxy-all.jar` 放到自定义路径，或点击 **"安装到 Claude Desktop"** 自动配置。
+
+> ⚠ **关于 Java 版本**：代理 JAR 要求 Java 21+。如果系统默认 `java` 版本较低，请在 `command` 中指定 JDK 21 的完整路径。可用 Gradle 工具链下载的 JDK（位置：`~/.jdks/ms-21.0.6/bin/java.exe`）或自行安装 JDK 21。
 
 ## 配置说明
 
@@ -247,6 +268,6 @@ mcpTool<MyToolArgs>("工具描述") {
 
 | 命令                      | 说明             |
 | ------------------------- | ---------------- |
-| `./gradlew build`         | 编译             |
-| `./gradlew test`          | 运行测试         |
-| `./gradlew embedProxyJar` | 构建可分发的 JAR |
+| `./gradlew embedProxyJar` | 构建可分发的 JAR（含内嵌代理） |
+| `./gradlew test`          | 运行测试                        |
+| `./gradlew shadowJar`     | 仅构建 JAR 本体，不含代理      |
