@@ -16,6 +16,7 @@ class StatusDashboardPanel : JPanel() {
     var fileQueue: FileQueue? = null
     var database: Database? = null
     var exporter: Exporter? = null
+    var activeConnectionProvider: (() -> Int)? = null
     var onRestartRequested: (() -> Unit)? = null
 
     private val refreshStatsTimer = Timer(3000) { refreshAll() }
@@ -31,6 +32,8 @@ class StatusDashboardPanel : JPanel() {
     private val fileQueueStatsLabel = createStatsValueLabel()
     private val dbStatsLabel = createStatsValueLabel()
     private val exporterStatsLabel = createStatsValueLabel()
+    private val clientCountLabel = createStatsValueLabel()
+    private val clientCountBadge = Design.createBadge("0", Design.Colors.primary)
     private val dbHttpBadge = Design.createBadge("0", Design.Colors.tertiary)
     private val dbScanBadge = Design.createBadge("0", Design.Colors.warning)
     private val queuePendingBadge = Design.createBadge("0", Design.Colors.primary)
@@ -112,6 +115,9 @@ class StatusDashboardPanel : JPanel() {
         add(createVerticalStrut(Design.Spacing.SM))
 
         add(createCompactStatsRow("导出器", null, exporterStatsLabel))
+        add(createVerticalStrut(Design.Spacing.SM))
+
+        add(createCompactStatsRow("客户端", clientCountBadge, clientCountLabel))
 
         add(createVerticalStrut(Design.Spacing.LG))
 
@@ -253,6 +259,16 @@ class StatusDashboardPanel : JPanel() {
             dbHttpBadge.text = "0"
             dbScanBadge.text = "0"
         }
+
+        // Connected clients
+        val connCount = activeConnectionProvider?.invoke() ?: 0
+        clientCountBadge.text = connCount.toString()
+        clientCountLabel.text = when {
+            connCount <= 0 -> "无连接"
+            connCount == 1 -> "1 个活跃连接"
+            else -> "$connCount 个活跃连接"
+        }
+        clientCountBadge.isVisible = connCount > 0
 
         // Exporter stats
         val eStats = exporter?.stats

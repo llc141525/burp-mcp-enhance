@@ -10,6 +10,10 @@ class HealthMonitor(
     private var consecutiveFailures = 0
     private val unhealthyThreshold = 3
 
+    fun reset() {
+        consecutiveFailures = 0
+    }
+
     suspend fun check() {
         val healthy = try {
             serverCheck()

@@ -61,7 +61,8 @@ class ExtensionBase : BurpExtension {
                             messageQueue = serverManager.messageQueue,
                             fileQueue = serverManager.fileQueue,
                             database = serverManager.database,
-                            exporter = serverManager.exporter
+                            exporter = serverManager.exporter,
+                            activeConnectionProvider = serverManager.activeSseConnections::get
                         )
                     } else if (state is ServerState.Stopped || state is ServerState.Failed) {
                         configUi.unbindInfrastructure()
@@ -85,7 +86,8 @@ class ExtensionBase : BurpExtension {
                         messageQueue = serverManager.messageQueue,
                         fileQueue = serverManager.fileQueue,
                         database = serverManager.database,
-                        exporter = serverManager.exporter
+                        exporter = serverManager.exporter,
+                        activeConnectionProvider = serverManager.activeSseConnections::get
                     )
                 } else if (state is ServerState.Failed) {
                     configUi.unbindInfrastructure()
@@ -110,7 +112,8 @@ class ExtensionBase : BurpExtension {
                         messageQueue = serverManager.messageQueue,
                         fileQueue = serverManager.fileQueue,
                         database = serverManager.database,
-                        exporter = serverManager.exporter
+                        exporter = serverManager.exporter,
+                        activeConnectionProvider = serverManager.activeSseConnections::get
                     )
                 }
             }

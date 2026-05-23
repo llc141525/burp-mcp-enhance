@@ -141,6 +141,32 @@ class HealthMonitorTest {
         monitor.check()
         assertEquals(1, triggerCount, "Should not trigger again until 3 more failures")
         monitor.check()
-        assertEquals(2, triggerCount, "Should trigger on 3rd failure after reset")
+        assertEquals(2, triggerCount, "Should trigger on 3rd failure after self-reset")
+    }
+
+    @Test
+    fun `reset should clear consecutive failure count`() = runBlocking {
+        var triggerCount = 0
+        val monitor = HealthMonitor(
+            serverCheck = { false },
+            onUnhealthy = { triggerCount++ },
+            logWriter = logWriter
+        )
+
+        // 3 failures → trigger fires
+        repeat(3) { monitor.check() }
+        assertEquals(1, triggerCount)
+
+        // External reset clears the counter
+        monitor.reset()
+
+        // 2 more failures should NOT trigger (counter was reset)
+        monitor.check()
+        monitor.check()
+        assertEquals(1, triggerCount, "Should not trigger after reset + 2 failures")
+
+        // 3rd failure after reset → trigger fires again
+        monitor.check()
+        assertEquals(2, triggerCount, "Should trigger after reset + 3 consecutive failures")
     }
 }

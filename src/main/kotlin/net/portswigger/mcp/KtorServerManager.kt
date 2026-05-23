@@ -138,6 +138,9 @@ class KtorServerManager(
 
         executor.submit {
             try {
+                // Clear all tracked SSE sessions — the old server is about to be
+                // stopped, which terminates all active SSE connections.
+                sseTransports.clear()
                 server?.stop(1000, 5000)
                 server = null
 
@@ -257,7 +260,7 @@ class KtorServerManager(
                     // and NATs require application-level data.
                     heartbeat {
                         period = config.keepaliveIntervalSec.seconds
-                        event = ServerSentEvent(comments = "keepalive")
+                        event = ServerSentEvent(event = "ping", data = "keepalive")
                     }
 
                     val transport = SseServerTransport("/sse", this)
@@ -320,7 +323,7 @@ class KtorServerManager(
 
         val healthMonitor = HealthMonitor(
             serverCheck = {
-                server != null && currentState.get() == ServerState.Running
+                (server != null && currentState.get() == ServerState.Running)
             },
             onUnhealthy = {
                 logWarn("heartbeat", "Health monitor triggering restart")
@@ -334,7 +337,7 @@ class KtorServerManager(
         )
 
         // Run health checks periodically. SSE keepalive is handled by Ktor's built-in
-        // ServerSSESession.heartbeat which sends SSE comments over each active connection.
+        // ServerSSESession.heartbeat which sends SSE data events over each active connection.
         healthMonitorJob = scope.launch {
             while (isActive) {
                 delay((config.keepaliveIntervalSec * 1000L).coerceAtLeast(100))
@@ -401,6 +404,7 @@ class KtorServerManager(
 
         executor.submit {
             try {
+                sseTransports.clear()
                 server?.stop(1000, 5000)
                 server = null
                 exporter?.shutdown()
@@ -431,6 +435,7 @@ class KtorServerManager(
         restartJob = null
         scope.cancel()
 
+        sseTransports.clear()
         server?.stop(1000, 5000)
         server = null
 

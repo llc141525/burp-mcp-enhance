@@ -45,7 +45,5 @@ bin/
 .claude
 .mcp.json
 ARCHITECTURE.md
-CLAUDE.md
-CODEMAP.md
 .github
 mcp-minimax

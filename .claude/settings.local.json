@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "PowerShell(cmd.exe /c \"rmdir /s /q E:\\\\下载\\\\mcp-server-main\\\\mcp-server-main\\\\build\\\\test-results\\\\test\\\\binary\" 2>&1)"
     ]
   }
 }

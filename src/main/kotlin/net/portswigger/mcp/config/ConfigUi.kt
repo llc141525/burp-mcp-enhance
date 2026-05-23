@@ -70,12 +70,14 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         messageQueue: Any?,
         fileQueue: Any?,
         database: Any?,
-        exporter: Any?
+        exporter: Any?,
+        activeConnectionProvider: (() -> Int)? = null
     ) {
         statusDashboard.messageQueue = messageQueue as? MessageQueue
         statusDashboard.fileQueue = fileQueue as? FileQueue
         statusDashboard.database = database as? Database
         statusDashboard.exporter = exporter as? Exporter
+        statusDashboard.activeConnectionProvider = activeConnectionProvider
         statusDashboard.onRestartRequested = {
             restartServerListener?.invoke()
         }
@@ -89,6 +91,7 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         statusDashboard.fileQueue = null
         statusDashboard.database = null
         statusDashboard.exporter = null
+        statusDashboard.activeConnectionProvider = null
         statusDashboard.refreshAll()
     }
 
