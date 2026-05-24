@@ -50,11 +50,11 @@ class McpServerIntegrationTest {
         
         runBlocking {
             var attempts = 0
-            while (!serverStarted && attempts < 10) {
+            while (!serverStarted && attempts < 30) {
                 delay(100)
                 attempts++
             }
-            
+
             if (!serverStarted) {
                 throw IllegalStateException("Server failed to start after timeout")
             }
@@ -78,7 +78,7 @@ class McpServerIntegrationTest {
     @Test
     fun `server should accept connections and list tools`() = runBlocking {
         try {
-            client.connectToServer("http://127.0.0.1:${testPort}")
+            client.connectToServer("http://127.0.0.1:${testPort}/sse")
             assertTrue(client.isConnected(), "Client should be connected to server")
 
             val tools = client.listTools()
@@ -97,7 +97,7 @@ class McpServerIntegrationTest {
 
     @Test
     fun `SSE client can reconnect and call tools after being idle`() = runBlocking {
-        client.connectToServer("http://127.0.0.1:${testPort}")
+        client.connectToServer("http://127.0.0.1:${testPort}/sse")
         assertTrue(client.isConnected(), "Client should be connected")
 
         // Basic interaction
@@ -109,7 +109,7 @@ class McpServerIntegrationTest {
         assertFalse(client.isConnected(), "Client should be disconnected after close")
 
         // Reconnect
-        client.connectToServer("http://127.0.0.1:${testPort}")
+        client.connectToServer("http://127.0.0.1:${testPort}/sse")
         assertTrue(client.isConnected(), "Client should reconnect successfully")
 
         val toolsAfterReconnect = client.listTools()

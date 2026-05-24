@@ -7,15 +7,19 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.request.*
+import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.sse.*
 import io.ktor.sse.*
-import io.modelcontextprotocol.kotlin.sdk.Implementation
-import io.modelcontextprotocol.kotlin.sdk.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
+import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.McpJson
+import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.SseServerTransport
+import io.modelcontextprotocol.kotlin.sdk.server.StreamableHttpServerTransport
 import kotlinx.coroutines.*
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.db.Database
@@ -31,7 +35,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.time.Duration.Companion.seconds
 
 class KtorServerManager(
     private val api: MontoyaApi,
@@ -65,8 +68,10 @@ class KtorServerManager(
         private set
 
     private val sseTransports = ConcurrentHashMap<String, SseServerTransport>()
+    private val streamableTransports = ConcurrentHashMap<String, StreamableHttpServerTransport>()
 
     private val currentState = AtomicReference<ServerState>(ServerState.Stopped)
+
     private val maxRestartAttempts = 3
 
     private fun logInfo(cat: String, msg: String) {
@@ -138,9 +143,11 @@ class KtorServerManager(
 
         executor.submit {
             try {
-                // Clear all tracked SSE sessions — the old server is about to be
-                // stopped, which terminates all active SSE connections.
+                // Clear all tracked sessions — the old server is about to be stopped.
                 sseTransports.clear()
+                val transportsToClose = streamableTransports.values.toList()
+                streamableTransports.clear()
+                transportsToClose.forEach { scope.launch { runCatching { it.close() } } }
                 server?.stop(1000, 5000)
                 server = null
 
@@ -192,14 +199,23 @@ class KtorServerManager(
 
                 allowMethod(HttpMethod.Get)
                 allowMethod(HttpMethod.Post)
+                allowMethod(HttpMethod.Delete)
 
                 allowHeader(HttpHeaders.ContentType)
                 allowHeader(HttpHeaders.Accept)
                 allowHeader("Last-Event-ID")
+                allowHeader("Mcp-Session-Id")
 
                 allowCredentials = false
                 allowNonSimpleContentTypes = true
                 maxAgeInSeconds = 3600
+            }
+
+            // Content negotiation for JSON responses (required by Streamable HTTP)
+            // Must use McpJson (explicitNulls=false) to match SDK serialization,
+            // otherwise _meta:null appears in responses and the MCP client rejects it.
+            install(ContentNegotiation) {
+                json(McpJson)
             }
 
             // SSE connection tracking
@@ -253,20 +269,17 @@ class KtorServerManager(
             install(SSE)
 
             routing {
-                // GET is handled without a path prefix — the MCP client connects to the base URL.
-                sse {
-                    // Ktor's built-in SSE heartbeat sends periodic SSE comments to keep the
-                    // connection alive. TCP keepalive alone is insufficient — many proxies
-                    // and NATs require application-level data.
-                    heartbeat {
-                        period = config.keepaliveIntervalSec.seconds
-                        event = ServerSentEvent(event = "ping", data = "keepalive")
-                    }
-
+                // SSE endpoint at /sse — matches both README config and proxy --sse-url convention.
+                sse("/sse") {
                     val transport = SseServerTransport("/sse", this)
                     sseTransports[transport.sessionId] = transport
                     try {
-                        mcpServer.connect(transport)
+                        mcpServer.createSession(transport)
+                        // In SDK 0.8.3, connect() returns immediately after sending the
+                        // endpoint event. awaitCancellation() keeps this Ktor SSE handler
+                        // suspended (and thus the SSE connection open) until the client
+                        // disconnects or the server is stopped.
+                        awaitCancellation()
                     } finally {
                         sseTransports.remove(transport.sessionId)
                     }
@@ -287,6 +300,54 @@ class KtorServerManager(
                     }
 
                     transport.handlePostMessage(call)
+                }
+
+                // Streamable HTTP transport (MCP spec 2025-03-26)
+                // Configure AI clients with: "url": "http://host:port/mcp"
+                post("/mcp") {
+                    val sessionId = call.request.header("Mcp-Session-Id")
+
+                    if (sessionId != null) {
+                        val transport = streamableTransports[sessionId] ?: run {
+                            logWarn("server", "Streamable session not found: $sessionId")
+                            call.respond(HttpStatusCode.NotFound, "Session not found")
+                            return@post
+                        }
+                        transport.handlePostRequest(null, call)
+                    } else {
+                        val t = StreamableHttpServerTransport(enableJsonResponse = true)
+                        t.setOnSessionInitialized { sid ->
+                            streamableTransports[sid] = t
+                            logInfo("server", "New Streamable HTTP session: $sid")
+                        }
+                        t.setOnSessionClosed { sid ->
+                            streamableTransports.remove(sid)
+                        }
+                        try {
+                            // createSession() MUST complete before handlePostRequest so
+                            // that _onMessage is wired up on the transport. Otherwise the
+                            // initialize JSON-RPC message parsed from the POST body is
+                            // dispatched to nothing and the client times out.
+                            mcpServer.createSession(t)
+                            t.handlePostRequest(null, call)
+                        } catch (e: Exception) {
+                            logError("server", "Streamable session error: ${e.message}", e)
+                            call.respond(HttpStatusCode.InternalServerError, "Session error: ${e.message}")
+                        }
+                    }
+                }
+
+                delete("/mcp") {
+                    val sessionId = call.request.header("Mcp-Session-Id") ?: run {
+                        call.respond(HttpStatusCode.BadRequest, "Mcp-Session-Id header required")
+                        return@delete
+                    }
+                    val transport = streamableTransports[sessionId] ?: run {
+                        logWarn("server", "Streamable session not found: $sessionId")
+                        call.respond(HttpStatusCode.NotFound, "Session not found")
+                        return@delete
+                    }
+                    transport.handleDeleteRequest(call)
                 }
             }
         }.apply {
@@ -336,8 +397,6 @@ class KtorServerManager(
             logWriter = logWriter
         )
 
-        // Run health checks periodically. SSE keepalive is handled by Ktor's built-in
-        // ServerSSESession.heartbeat which sends SSE data events over each active connection.
         healthMonitorJob = scope.launch {
             while (isActive) {
                 delay((config.keepaliveIntervalSec * 1000L).coerceAtLeast(100))
@@ -405,6 +464,9 @@ class KtorServerManager(
         executor.submit {
             try {
                 sseTransports.clear()
+                val transportsToClose = streamableTransports.values.toList()
+                streamableTransports.clear()
+                transportsToClose.forEach { scope.launch { runCatching { it.close() } } }
                 server?.stop(1000, 5000)
                 server = null
                 exporter?.shutdown()
@@ -436,6 +498,7 @@ class KtorServerManager(
         scope.cancel()
 
         sseTransports.clear()
+        streamableTransports.clear()
         server?.stop(1000, 5000)
         server = null
 

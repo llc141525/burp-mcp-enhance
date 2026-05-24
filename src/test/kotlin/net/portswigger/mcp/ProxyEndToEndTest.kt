@@ -90,7 +90,7 @@ class ProxyEndToEndTest {
             "-jar",
             jarFile.absolutePath,
             "--sse-url",
-            "http://127.0.0.1:$testPort"
+            "http://127.0.0.1:$testPort/sse"
         ).redirectError(ProcessBuilder.Redirect.INHERIT).start()
 
         client = TestStdioMcpClient()

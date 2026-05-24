@@ -409,17 +409,17 @@ class KtorServerManagerTest {
     }
 
     // ========================
-    // AC1: Heartbeat sends real data event (not SSE comment)
+    // AC1: Heartbeat uses SSE comments for maximum client compatibility
     // ========================
 
     @Test
-    fun `heartbeat event should use data parameter not comments for NAT traversal`() {
-        // Ktor SSE heartbeat must send real data events so NAT devices
-        // recognize the connection as active traffic. SSE comments are
-        // typically ignored by NAT/proxy devices.
-        val event = ServerSentEvent(event = "ping", data = "keepalive")
-        assertNotNull(event.data, "Heartbeat event must have data content for NAT traversal")
-        assertTrue(event.data!!.contains("keepalive"), "Heartbeat data must contain recognizable payload")
+    fun `heartbeat event should use comments for safe keepalive`() {
+        // SSE comments (:keepalive) are ignored by all MCP SDK clients and
+        // EventSource implementations, while still producing bytes on the wire
+        // that satisfy NAT/proxy keepalive requirements.
+        val event = ServerSentEvent(comments = "keepalive")
+        assertNotNull(event.comments, "Heartbeat event must use comments field")
+        assertTrue(event.comments!!.contains("keepalive"), "Heartbeat comment must contain recognizable payload")
     }
 
     // ========================

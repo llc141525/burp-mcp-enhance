@@ -3,7 +3,10 @@ package net.portswigger.mcp
 import io.ktor.client.*
 import io.ktor.client.plugins.*
 import io.ktor.client.plugins.sse.*
-import io.modelcontextprotocol.kotlin.sdk.*
+import io.modelcontextprotocol.kotlin.sdk.EmptyRequestResult
+import io.modelcontextprotocol.kotlin.sdk.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.Tool
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.SseClientTransport
 import org.slf4j.LoggerFactory
@@ -31,10 +34,10 @@ class TestSseMcpClient {
             connected = true
 
             val toolsResult = mcp.listTools()
-            tools = toolsResult?.tools ?: emptyList()
-            println("Connected to server with tools: ${tools.joinToString(", ") { it.name }}")
+            tools = toolsResult.tools
         } catch (e: Exception) {
             println("Failed to connect to MCP server: $e")
+            e.printStackTrace()
             throw e
         }
     }
@@ -55,7 +58,7 @@ class TestSseMcpClient {
     suspend fun listTools(): List<Tool> {
         try {
             val toolsResult = mcp.listTools()
-            tools = toolsResult?.tools ?: emptyList()
+            tools = toolsResult.tools
             logger.info("Tools listed: ${tools.joinToString(", ") { it.name }}")
             return tools
         } catch (e: Exception) {
@@ -64,7 +67,7 @@ class TestSseMcpClient {
         }
     }
 
-    suspend fun callTool(toolName: String, arguments: Map<String, Any>): CallToolResultBase? {
+    suspend fun callTool(toolName: String, arguments: Map<String, Any>): CallToolResult {
         try {
             return mcp.callTool(toolName, arguments)
         } catch (e: Exception) {

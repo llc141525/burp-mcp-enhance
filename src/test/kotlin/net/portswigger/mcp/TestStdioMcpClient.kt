@@ -1,9 +1,9 @@
 package net.portswigger.mcp
 
-import io.modelcontextprotocol.kotlin.sdk.CallToolResultBase
 import io.modelcontextprotocol.kotlin.sdk.EmptyRequestResult
 import io.modelcontextprotocol.kotlin.sdk.Implementation
-import io.modelcontextprotocol.kotlin.sdk.Tool
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.Tool
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.client.StdioClientTransport
 import kotlinx.io.asSink
@@ -35,7 +35,7 @@ class TestStdioMcpClient {
         return mcp.listTools().tools
     }
 
-    suspend fun callTool(toolName: String, arguments: Map<String, Any>): CallToolResultBase? {
+    suspend fun callTool(toolName: String, arguments: Map<String, Any>): CallToolResult {
         return mcp.callTool(toolName, arguments)
     }
 

@@ -22,8 +22,8 @@ import io.mockk.*
 import java.net.InetAddress
 import java.time.ZonedDateTime
 import java.util.Optional
-import io.modelcontextprotocol.kotlin.sdk.CallToolResultBase
-import io.modelcontextprotocol.kotlin.sdk.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -95,7 +95,7 @@ class ToolsKtTest {
         mockkStatic(HttpRequest::class)
     }
 
-    private fun CallToolResultBase?.expectTextContent(
+    private fun CallToolResult?.expectTextContent(
         expected: String? = null,
     ): String {
         assertNotNull(this, "Tool result cannot be null")
@@ -159,7 +159,7 @@ class ToolsKtTest {
             }
             if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
 
-            client.connectToServer("http://127.0.0.1:${testPort}")
+            client.connectToServer("http://127.0.0.1:${testPort}/sse")
             assertNotNull(client.ping(), "Ping should return a result")
         }
     }
@@ -922,7 +922,7 @@ class ToolsKtTest {
                     attempts++
                 }
                 if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
-                client.connectToServer("http://127.0.0.1:${testPort}")
+                client.connectToServer("http://127.0.0.1:${testPort}/sse")
             }
         }
 
@@ -1224,7 +1224,7 @@ class ToolsKtTest {
             // Reconnect client if needed after collaborator test cleanup
             runBlocking {
                 if (!client.isConnected()) {
-                    client.connectToServer("http://127.0.0.1:${testPort}")
+                    client.connectToServer("http://127.0.0.1:${testPort}/sse")
                 }
             }
         }
@@ -1303,7 +1303,7 @@ class ToolsKtTest {
         fun setupExporterTest() {
             runBlocking {
                 if (!client.isConnected()) {
-                    client.connectToServer("http://127.0.0.1:${testPort}")
+                    client.connectToServer("http://127.0.0.1:${testPort}/sse")
                 }
             }
         }
@@ -1471,7 +1471,7 @@ class ToolsKtTest {
             }
             if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
 
-            client.connectToServer("http://127.0.0.1:${testPort}")
+            client.connectToServer("http://127.0.0.1:${testPort}/sse")
 
             val tools = client.listTools()
             assertTrue(tools.any { it.name == "get_scanner_issues" })

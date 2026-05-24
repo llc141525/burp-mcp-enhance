@@ -1,10 +1,11 @@
 package net.portswigger.mcp.tools
 
-import io.modelcontextprotocol.kotlin.sdk.CallToolResult
-import io.modelcontextprotocol.kotlin.sdk.PromptMessageContent
-import io.modelcontextprotocol.kotlin.sdk.TextContent
-import io.modelcontextprotocol.kotlin.sdk.Tool
 import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.ContentBlock
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.serialization.json.JsonObject
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.InternalSerializationApi
@@ -62,7 +63,7 @@ internal const val DEFAULT_TOOL_TIMEOUT_MS = 120_000L
 @OptIn(InternalSerializationApi::class)
 inline fun <reified I : Any> Server.mcpTool(
     description: String,
-    crossinline execute: I.() -> List<PromptMessageContent>
+    crossinline execute: I.() -> List<ContentBlock>
 ) {
     val toolName = I::class.simpleName?.toLowerSnakeCase() ?: error("Couldn't find name for ${I::class}")
 
@@ -77,7 +78,7 @@ inline fun <reified I : Any> Server.mcpTool(
                         execute(
                             lenientJson.decodeFromJsonElement(
                                 I::class.serializer(),
-                                normalizeJsonElement(request.arguments)
+                                normalizeJsonElement(request.arguments ?: JsonObject(emptyMap()))
                             )
                         )
                     }
@@ -192,12 +193,12 @@ inline fun <reified I : Paginated> Server.mcpPaginatedTool(
 inline fun Server.mcpTool(
     name: String,
     description: String,
-    crossinline execute: () -> List<PromptMessageContent>
+    crossinline execute: () -> List<ContentBlock>
 ) {
     addTool(
         name = name,
         description = description,
-        inputSchema = Tool.Input(),
+        inputSchema = ToolSchema(),
         handler = {
             try {
                 CallToolResult(
@@ -227,7 +228,7 @@ inline fun Server.mcpTool(
     addTool(
         name = name,
         description = description,
-        inputSchema = Tool.Input(),
+        inputSchema = ToolSchema(),
         handler = {
             try {
                 CallToolResult(
