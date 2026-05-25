@@ -1,0 +1,129 @@
+/*
+* Copyright 2014-2021 JetBrains s.r.o and contributors. Use of this source code is governed by the Apache 2.0 license.
+*/
+
+package io.ktor.client.plugins
+
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.plugins.api.*
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.events.*
+import io.ktor.http.*
+import io.ktor.util.logging.*
+import io.ktor.utils.io.*
+
+private val ALLOWED_FOR_REDIRECT: Set<HttpMethod> = setOf(HttpMethod.Get, HttpMethod.Head)
+
+private val LOGGER = KtorSimpleLogger("io.ktor.client.plugins.HttpRedirect")
+
+/**
+ * Occurs when receiving a response with a redirect message.
+ *
+ * [Report a problem](https://ktor.io/feedback/?fqname=io.ktor.client.plugins.HttpResponseRedirectEvent)
+ */
+public val HttpResponseRedirectEvent: EventDefinition<HttpResponse> = EventDefinition()
+
+@KtorDsl
+public class HttpRedirectConfig {
+
+    /**
+     * Checks whether the HTTP method is allowed for the redirect.
+     * Only [HttpMethod.Get] and [HttpMethod.Head] are allowed for implicit redirection.
+     *
+     * Please note: changing this flag could lead to security issues, consider changing the request URL instead.
+     *
+     * [Report a problem](https://ktor.io/feedback/?fqname=io.ktor.client.plugins.HttpRedirectConfig.checkHttpMethod)
+     */
+    public var checkHttpMethod: Boolean = true
+
+    /**
+     * `true` allows a client to make a redirect with downgrading from HTTPS to plain HTTP.
+     *
+     * [Report a problem](https://ktor.io/feedback/?fqname=io.ktor.client.plugins.HttpRedirectConfig.allowHttpsDowngrade)
+     */
+    public var allowHttpsDowngrade: Boolean = false
+}
+
+@OptIn(InternalAPI::class)
+public val HttpRedirect: ClientPlugin<HttpRedirectConfig> = createClientPlugin(
+    "HttpRedirect",
+    ::HttpRedirectConfig
+) {
+
+    val checkHttpMethod: Boolean = pluginConfig.checkHttpMethod
+    val allowHttpsDowngrade: Boolean = pluginConfig.allowHttpsDowngrade
+
+    suspend fun Send.Sender.handleCall(
+        context: HttpRequestBuilder,
+        origin: HttpClientCall,
+        allowHttpsDowngrade: Boolean,
+        client: HttpClient
+    ): HttpClientCall {
+        var call = origin
+        var requestBuilder = context
+
+        while (true) {
+            // Protocol/authority of the current hop
+            val previousProtocol = call.request.url.protocol
+            val previousAuthority = call.request.url.authority
+            if (!call.response.status.isRedirect()) return call
+
+            val location = call.response.headers[HttpHeaders.Location]
+
+            if (location == null) {
+                LOGGER.warn(
+                    "Location header missing from redirect response ${call.request.url}; returning response as is"
+                )
+                return call
+            }
+
+            client.monitor.raise(HttpResponseRedirectEvent, call.response)
+            LOGGER.trace("Received redirect response to $location for request ${call.request.url}")
+
+            requestBuilder = HttpRequestBuilder().apply {
+                takeFromWithExecutionContext(requestBuilder)
+                url.parameters.clear()
+                url.takeFrom(location)
+
+                /**
+                 * Disallow redirect with a security downgrade.
+                 */
+                if (!allowHttpsDowngrade && previousProtocol.isSecure() && !url.protocol.isSecure()) {
+                    LOGGER.trace("Blocked redirect from ${call.request.url} to $location due to HTTPS downgrade")
+                    return call
+                }
+
+                if (previousAuthority != url.authority) {
+                    headers.remove(HttpHeaders.Authorization)
+                    LOGGER.trace(
+                        "Removing Authorization header for cross-authority redirect: " +
+                            "$previousAuthority -> ${url.buildString()}"
+                    )
+                }
+            }
+
+            call = proceed(requestBuilder)
+        }
+    }
+
+    on(Send) { request ->
+        val origin = proceed(request)
+        if (checkHttpMethod && origin.request.method !in ALLOWED_FOR_REDIRECT) {
+            return@on origin
+        }
+
+        handleCall(request, origin, allowHttpsDowngrade, client)
+    }
+}
+
+private fun HttpStatusCode.isRedirect(): Boolean = when (value) {
+    HttpStatusCode.MovedPermanently.value,
+    HttpStatusCode.Found.value,
+    HttpStatusCode.TemporaryRedirect.value,
+    HttpStatusCode.PermanentRedirect.value,
+    HttpStatusCode.SeeOther.value -> true
+
+    else -> false
+}
